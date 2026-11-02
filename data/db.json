@@ -1,0 +1,128 @@
+{
+  "users": [
+    {
+      "id": "usr_06ad93b7-72f4-4100-a0df-9f05e87000b0",
+      "email": "trader@devoptions.io",
+      "phone": "+14155552671",
+      "passwordHash": "59790b9867da89dae29892f75e6486052d06c76c2db93ba90eeabfca20e573a6470ec6912668f51badae8d0e1f992ee440f67a81377fdc9fea9f6b80e9b29e30",
+      "salt": "6f20f4620ce242e6df01fa12886476a1",
+      "createdAt": 1793090378560,
+      "emailVerified": true,
+      "phoneVerified": true,
+      "demoBalance": 10000,
+      "realBalance": 0,
+      "fullName": "",
+      "country": "International"
+    },
+    {
+      "id": "admin_4f5a945e",
+      "email": "admin@devoptions.io",
+      "phone": "+18005550199",
+      "passwordHash": "50e1222763df11f19ac8d2b56386c0ef1187cdba0cf75dc72c316aaa54f74ed0fc8ca8f931e28d119aeedf7a2ff31e78dd008edc9be1d0a9c84084ce074213f6",
+      "salt": "ce78d390b69b7393e47880749c5035e0",
+      "role": "admin",
+      "createdAt": 1793259641336,
+      "emailVerified": true,
+      "phoneVerified": true,
+      "demoBalance": 100000,
+      "realBalance": 50000,
+      "fullName": "DevOptions Master Admin",
+      "country": "Global Operations"
+    },
+    {
+      "id": "admin_8bb442bc",
+      "email": "francisgraham071@gmail.com",
+      "phone": "+12345678900",
+      "passwordHash": "b1e4c1408da26232416f6e1e47448fe3ed51a4459e4ba7521d3ce7b6af7649eb0825210f0ad46f1b5e3ecb23ad7d55f6e0b2e43ea342bfaf3f360bda592d704c",
+      "salt": "c4db6eca9958d74019543c2c19c71b76",
+      "role": "admin",
+      "createdAt": 1793259641402,
+      "emailVerified": true,
+      "phoneVerified": true,
+      "demoBalance": 100000,
+      "realBalance": 50000,
+      "fullName": "Francis Graham (Admin)",
+      "country": "United States"
+    },
+    {
+      "id": "usr_cedc8c4b-28b1-4110-83ed-e91114b1959d",
+      "email": "testtrader_1793623311013@example.com",
+      "phone": "+14155551234",
+      "passwordHash": "4a04115f8310e2d9ebc1dd23b5f43cf949e96ced226ff5efa8f8945317801e3c8a95d8d4d6b1cd8bdaa091f1411985f8400d7fea22aa6506cf75b3a731debfa5",
+      "salt": "818b8cb25d4d6fb0d23cca51e05cb0c5",
+      "createdAt": 1793623311221,
+      "emailVerified": false,
+      "phoneVerified": false,
+      "emailVerificationCode": "641031",
+      "emailVerificationExpires": 1793624211221,
+      "phoneVerificationCode": "412755",
+      "phoneVerificationExpires": 1793624211221,
+      "demoBalance": 10000,
+      "realBalance": 0,
+      "fullName": "",
+      "country": "International"
+    },
+    {
+      "id": "usr_30fbad38-6943-4417-af94-8331c387287e",
+      "email": "trader_1793623780378@devoptions.io",
+      "phone": "+14155691499",
+      "passwordHash": "aab61976be1f825dfcf90a26c1a4df8504346935208eb933eae2631dd5c41eecaea2b0bccb5708dd0f16927d8bd48a53bd179a2dc400650b581f411fe8114887",
+      "salt": "543f1f3644e3bc47d68ab8c1dc0ecc08",
+      "createdAt": 1793623780612,
+      "emailVerified": true,
+      "phoneVerified": false,
+      "phoneVerificationCode": "258189",
+      "phoneVerificationExpires": 1793624680612,
+      "demoBalance": 10000,
+      "realBalance": 0,
+      "fullName": "",
+      "country": "International"
+    }
+  ],
+  "sessions": [
+    {
+      "token": "316baf707dfcfc88ad7e3ce137b06432293656bab41b536bb7e2ca3bacd876f6",
+      "userId": "usr_06ad93b7-72f4-4100-a0df-9f05e87000b0",
+      "createdAt": 1793090411368,
+      "expiresAt": 1793695211368
+    },
+    {
+      "token": "4b812be05283c77ab9a2b0910f1dc2c1ed57575e2e88b190f1865348c3384c58",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793260064411,
+      "expiresAt": 1793864864411
+    },
+    {
+      "token": "3361010887110ce4ad12792bb658222f1bb8bb4b716c2879cfe08fd8615e1d25",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793531359955,
+      "expiresAt": 1794136159955
+    },
+    {
+      "token": "2f899191f0e61047c607365d318b3701ff8a809c53289a23e87506119fa17ab8",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793608370139,
+      "expiresAt": 1794213170139
+    },
+    {
+      "token": "4257e1e7cb98f949cc7a73a45818275ac22bc72ce04d630b6dc7d099c4c033eb",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793608497700,
+      "expiresAt": 1794213297700
+    },
+    {
+      "token": "012d2bb8c9c63337825c25296bae42490c25d1ba4087aca343bfff9c81c97f66",
+      "userId": "usr_cedc8c4b-28b1-4110-83ed-e91114b1959d",
+      "createdAt": 1793623311221,
+      "expiresAt": 1794228111221
+    },
+    {
+      "token": "d7588d0049061e7ab03c1f28e509f4e80679680da08bf6ca87147cfec9a09ef7",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793623780880,
+      "expiresAt": 1794228580880
+    }
+  ],
+  "trades": [],
+  "deposits": []
+}

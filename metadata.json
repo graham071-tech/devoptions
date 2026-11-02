@@ -1,0 +1,6 @@
+{
+  "name": "Stratum Binary Pro",
+  "description": "Professional binary options and synthetic indices trading terminal featuring visual block strategy automation, real Deriv market feeds, historical backtesting, and risk-controlled demo execution.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
