@@ -1789,19 +1789,5 @@ app.get('/api/health', (req: Request, res: Response) => {
   return res.json({ status: 'ok', service: 'DevOptions Backend', timestamp: Date.now() });
 });
 
-// Local development only. Vercel imports the Express app as a serverless function.
-if (!process.env.VERCEL) {
-  const startServer = async () => {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
-    app.use(vite.middlewares);
-    app.listen(Number(PORT), '0.0.0.0', () => {
-      console.log(`[DevOptions] Development server listening on http://0.0.0.0:${PORT}`);
-    });
-  };
-  startServer().catch((error) => {
-    console.error('Fatal error starting DevOptions server:', error);
-    process.exit(1);
-  });
-}
+// Export only the Express application. Vercel handles the server lifecycle.
 export default app;
