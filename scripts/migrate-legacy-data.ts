@@ -167,7 +167,7 @@ async function main() {
   console.log('Users migrated: ' + userRows.length);
   console.log('Trades migrated: ' + trades.length);
   console.log('Deposits migrated: ' + depositRows.length);
-  console.log('Legacy sessions deliberately not migrated: ' + (legacy as any).sessions?.length || 0);
+  console.log('Legacy sessions deliberately not migrated: ' + ((legacy as any).sessions?.length ?? 0));
 }
 
 main().catch((error) => {
