@@ -1,25 +1,40 @@
-name: Migrate legacy data to Supabase
+name: One-time legacy database migration
 
 on:
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type MIGRATE to confirm importing legacy data into Supabase"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   migrate:
+    if: ${{ inputs.confirm == 'MIGRATE' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Check out selected branch
+      - name: Check out migration branch and full history
         uses: actions/checkout@v4
+        with:
+          ref: fix/supabase-vercel-backend
+          fetch-depth: 0
+
+      - name: Fetch original main branch data
+        run: git fetch origin main
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Install migration dependencies
-        run: npm install --no-save @supabase/supabase-js tsx
-      - name: Import legacy accounts and records
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Import legacy records into Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: npx tsx scripts/migrate-legacy-json.ts
+        run: npx tsx scripts/migrate-legacy-data.ts
