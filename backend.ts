@@ -401,7 +401,10 @@ function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?
             phoneOtp: process.env.NODE_ENV !== 'production' && !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
             info: process.env.NODE_ENV !== 'production'
               ? 'Development verification codes are shown in this notice.'
-              : 'Verification codes are sent through the configured email and SMS providers. If a code does not arrive, contact support.',
+              : [
+                  !user.emailVerified && !hasSmtpConfig() ? 'Email delivery is not configured.' : '',
+                  !user.phoneVerified && !hasTwilioConfig() ? 'SMS delivery is not configured.' : '',
+                ].filter(Boolean).join(' ') || 'Verification codes have been sent through the configured providers.',
             emailConfigured: hasSmtpConfig(),
             smsConfigured: hasTwilioConfig(),
           }
@@ -418,9 +421,9 @@ function hasTwilioConfig(): boolean {
 }
 async function sendEmailCode(to: string, code: string, purpose: 'verification' | 'password reset'): Promise<void> {
   if (!hasSmtpConfig()) throw new Error('SMTP delivery is not configured.');
-  const nodemailer = await import('nodemailer');
+  const { createTransport } = await import('nodemailer');
   const port = Number(process.env.SMTP_PORT || 587);
-  const transporter = nodemailer.default.createTransport({
+  const transporter = createTransport({
     host: process.env.SMTP_HOST,
     port,
     secure: port === 465,
