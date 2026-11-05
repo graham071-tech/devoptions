@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { paynectaService } from './src/services/paynectaService';
+import { getSupabaseClient } from './src/services/supabaseService';
 
 dotenv.config();
 
