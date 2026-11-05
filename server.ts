@@ -376,65 +376,130 @@ interface AuthenticatedRequest extends Request {
   sessionToken?: string;
 }
 
-function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  let token: string | undefined;
+async function requireAuth(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    let token: string | undefined;
 
-  // 1. Check Bearer Authorization header
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.split(' ')[1]?.trim();
-  }
-
-  // 2. Check x-auth-token header
-  if (!token && req.headers['x-auth-token']) {
-    token = String(req.headers['x-auth-token']).trim();
-  }
-
-  // 3. Check devoptions_session cookie
-  if (!token && req.headers.cookie) {
-    const cookies = parseCookies(req.headers.cookie);
-    if (cookies['devoptions_session']) {
-      token = cookies['devoptions_session'].trim();
+    // 1. Check Bearer Authorization header
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1]?.trim();
     }
-  }
 
-  if (!token) {
-    return res.status(401).json({
-      error: 'Not logged in',
-      message: 'Please log in to continue.',
-      code: 'AUTH_REQUIRED',
-    });
-  }
+    // 2. Check x-auth-token header
+    if (!token && req.headers['x-auth-token']) {
+      token = String(req.headers['x-auth-token']).trim();
+    }
 
-  const session = db.sessions.find((s) => s.token === token);
-  if (!session) {
-    return res.status(401).json({
-      error: 'Invalid token',
-      message: 'Authentication could not be verified.',
-      code: 'INVALID_TOKEN',
-    });
-  }
+    // 3. Check devoptions_session cookie
+    if (!token && req.headers.cookie) {
+      const cookies = parseCookies(req.headers.cookie);
+      if (cookies['devoptions_session']) {
+        token = cookies['devoptions_session'].trim();
+      }
+    }
 
-  if (session.expiresAt < Date.now()) {
-    return res.status(401).json({
-      error: 'Session expired',
-      message: 'Your session has expired. Please log in again.',
-      code: 'SESSION_EXPIRED',
-    });
-  }
+    if (!token) {
+      return res.status(401).json({
+        error: 'Not logged in',
+        message: 'Please log in to continue.',
+        code: 'AUTH_REQUIRED',
+      });
+    }
 
-  const user = db.users.find((u) => u.id === session.userId);
-  if (!user) {
-    return res.status(401).json({
-      error: 'Account inactive',
-      message: 'Contact support for assistance.',
-      code: 'ACCOUNT_INACTIVE',
-    });
-  }
+    const supabase = getSupabaseClient();
 
-  req.user = user;
-  req.sessionToken = token;
-  next();
+    const { data: session, error: sessionError } = await supabase
+      .from('sessions')
+      .select('*')
+      .eq('token', token)
+      .maybeSingle();
+
+    if (sessionError) {
+      console.error('[Supabase Session Error]:', sessionError);
+      return res.status(500).json({ error: 'Could not verify session.' });
+    }
+
+    if (!session) {
+      return res.status(401).json({
+        error: 'Invalid token',
+        message: 'Authentication could not be verified.',
+        code: 'INVALID_TOKEN',
+      });
+    }
+
+    if (Number(session.expires_at) < Date.now()) {
+      await supabase.from('sessions').delete().eq('token', token);
+
+      return res.status(401).json({
+        error: 'Session expired',
+        message: 'Your session has expired. Please log in again.',
+        code: 'SESSION_EXPIRED',
+      });
+    }
+
+    const { data: row, error: userError } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', session.user_id)
+      .maybeSingle();
+
+    if (userError) {
+      console.error('[Supabase User Error]:', userError);
+      return res.status(500).json({ error: 'Could not verify account.' });
+    }
+
+    if (!row) {
+      return res.status(401).json({
+        error: 'Account inactive',
+        message: 'Contact support for assistance.',
+        code: 'ACCOUNT_INACTIVE',
+      });
+    }
+
+    const user: UserRecord = {
+      id: row.id,
+      email: row.email,
+      phone: row.phone,
+      passwordHash: row.password_hash,
+      salt: row.salt,
+      role: row.role,
+      createdAt: Number(row.created_at),
+      emailVerified: row.email_verified,
+      phoneVerified: row.phone_verified,
+      emailVerificationCode: row.email_verification_code || undefined,
+      emailVerificationExpires: row.email_verification_expires == null
+        ? undefined
+        : Number(row.email_verification_expires),
+      phoneVerificationCode: row.phone_verification_code || undefined,
+      phoneVerificationExpires: row.phone_verification_expires == null
+        ? undefined
+        : Number(row.phone_verification_expires),
+      resetPasswordToken: row.reset_password_token || undefined,
+      resetPasswordExpires: row.reset_password_expires == null
+        ? undefined
+        : Number(row.reset_password_expires),
+      demoBalance: Number(row.demo_balance),
+      realBalance: Number(row.real_balance),
+      fullName: row.full_name || '',
+      country: row.country || 'International',
+      theme: row.theme || undefined,
+      soundEnabled: row.sound_enabled ?? undefined,
+    };
+
+    req.user = user;
+    req.sessionToken = token;
+
+    return next();
+  } catch (err) {
+    console.error('[Supabase Authentication Error]:', err);
+    return res.status(500).json({ error: 'Authentication service unavailable.' });
+  }
+}
 }
 
 function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
