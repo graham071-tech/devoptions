@@ -395,6 +395,32 @@ class AuthClient {
     return Array.isArray(data.trades) ? data.trades : [];
   }
 
+  public async placeTrade(trade: any, mode: 'demo' | 'real'): Promise<{ demoBalance: number; realBalance: number }> {
+    if (!this.getToken()) throw new Error('Authentication required');
+    const res = await fetch('/api/user/trades/place', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify({ trade, mode }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not place trade');
+    return data.balances;
+  }
+
+  public async settleTrade(trade: any): Promise<{ demoBalance: number; realBalance: number }> {
+    if (!this.getToken()) throw new Error('Authentication required');
+    const res = await fetch(`/api/user/trades/${encodeURIComponent(trade.id)}/settle`, {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(trade),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not settle trade');
+    return data.balances;
+  }
+
   public async saveTrade(trade: any): Promise<void> {
     if (!this.getToken()) return;
     const res = await fetch('/api/user/trades', {
