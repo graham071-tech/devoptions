@@ -395,7 +395,7 @@ class AuthClient {
     return Array.isArray(data.trades) ? data.trades : [];
   }
 
-  public async saveTrade(trade: Record<string, any>): Promise<void> {
+  public async saveTrade(trade: any): Promise<void> {
     if (!this.getToken()) return;
     const res = await fetch('/api/user/trades', {
       method: 'POST',
