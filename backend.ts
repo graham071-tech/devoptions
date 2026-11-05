@@ -866,11 +866,11 @@ app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: 
 app.post('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const trade = req.body;
-    if (!trade || typeof trade !== 'object' || !trade.id) return res.status(400).json({ error: 'Invalid trade payload' });
+    if (!trade || typeof trade !== 'object' || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128) return res.status(400).json({ error: 'Invalid trade payload' });
     const saved = { ...trade, userId: req.user!.id, recordedAt: Date.now() };
-    const { error } = await getSupabaseClient().from('trades').upsert({
+    const { error } = await getSupabaseClient().from('trades').insert({
       id: String(saved.id), user_id: req.user!.id, trade_data: saved, recorded_at: saved.recordedAt,
-    }, { onConflict: 'id' });
+    });
     if (error) throw error;
     return res.status(201).json({ message: 'Trade saved', trade: saved });
   } catch (error) {
