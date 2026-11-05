@@ -863,7 +863,7 @@ app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: 
     return res.status(500).json({ error: 'Could not load trade history.' });
   }
 });
-app.post('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/user/trades', requireAuth, rateLimitMiddleware(60, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const trade = req.body;
     if (!trade || typeof trade !== 'object' || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128) return res.status(400).json({ error: 'Invalid trade payload' });
@@ -1516,6 +1516,7 @@ app.post(
 app.post(
   '/api/paynecta/cancel-deposit/:id',
   requireAuth,
+  rateLimitMiddleware(10, 60000),
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const depositId = req.params.id;
