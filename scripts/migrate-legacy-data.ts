@@ -102,8 +102,19 @@ async function main() {
     throw new Error('The legacy database is empty; refusing to run an empty migration.');
   }
 
+  // Supabase's new sb_secret_* keys are opaque API keys, not JWTs.
+  // Older supabase-js clients may also send the key as Authorization: Bearer,
+  // which makes the gateway try to parse it as a JWT and reject it.
+  // For this one-time database migration, send the secret only as apikey.
   const supabase = createClient(url, secret, {
     auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
+    global: {
+      fetch: (input, init = {}) => {
+        const headers = new Headers(init.headers);
+        headers.delete('Authorization');
+        return fetch(input, { ...init, headers });
+      },
+    },
   });
 
   // Keep password hashes/salts so users retain their passwords. Never copy
