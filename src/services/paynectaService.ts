@@ -503,8 +503,11 @@ class PaynectaService {
 
     if (amount < config.minDepositKes) {
       throw new Error(
-        `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. USD $${config.minDepositUsd.toFixed(2)}).`
+        `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. USD ${config.minDepositUsd.toFixed(2)}).`
       );
+    }
+    if (amount > 250000) {
+      throw new Error('The maximum single Paynecta M-Pesa payment is KES 250,000.');
     }
 
     // 2. Email Validation
