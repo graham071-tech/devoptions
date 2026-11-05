@@ -85,6 +85,12 @@ function TradingAppContent() {
           demoBalance: u.demoBalance ?? prev.demoBalance,
           realBalance: u.realBalance ?? prev.realBalance,
         }));
+        authClient.getTrades().then((serverTrades) => {
+          if (serverTrades.length) {
+            storage.replaceTradeHistory(serverTrades as Trade[]);
+            setCompletedTrades(serverTrades as Trade[]);
+          }
+        }).catch((error) => console.warn('Could not sync server trade history:', error));
       }
     });
 
@@ -202,7 +208,10 @@ function TradingAppContent() {
       }
 
       // Persist to storage
-      newlyCompleted.forEach((t) => storage.addTrade(t));
+      newlyCompleted.forEach((t) => {
+        storage.addTrade(t);
+        authClient.saveTrade(t).catch((error) => console.warn('Could not sync completed trade:', error));
+      });
 
       // Audio and toast feedback
       const hasWin = newlyCompleted.some((t) => t.status === 'won');
