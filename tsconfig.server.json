@@ -5,7 +5,7 @@
     "noEmit": true
   },
   "include": [
-    "server.ts",
+    "backend.ts",
     "api/**/*.ts",
     "scripts/**/*.ts",
     "src/services/**/*.ts"
