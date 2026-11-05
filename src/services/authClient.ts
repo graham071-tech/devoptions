@@ -405,6 +405,11 @@ class AuthClient {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not place trade');
+    if (this.currentUser && data.balances) {
+      this.currentUser = { ...this.currentUser, ...data.balances };
+      localStorage.setItem(USER_KEY, JSON.stringify(this.currentUser));
+      this.notify();
+    }
     return data.balances;
   }
 
@@ -418,6 +423,11 @@ class AuthClient {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not settle trade');
+    if (this.currentUser && data.balances) {
+      this.currentUser = { ...this.currentUser, ...data.balances };
+      localStorage.setItem(USER_KEY, JSON.stringify(this.currentUser));
+      this.notify();
+    }
     return data.balances;
   }
 
