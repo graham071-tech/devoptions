@@ -108,12 +108,9 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 <span className="font-extrabold text-sm tracking-tight text-white group-hover:text-cyan-400 transition-colors">
                   DevOptions
                 </span>
-                <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 font-mono font-bold">
-                  PRO
-                </span>
               </div>
               <span className="text-[9px] text-slate-400 uppercase tracking-wider font-mono block">
-                AI Trading Terminal
+                Algorithmic Trading
               </span>
             </div>
           </button>
@@ -133,7 +130,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         {/* ─────────────────────────────────────────────────────────────
             ACCOUNT BALANCE & MODE SELECTOR CARD
         ───────────────────────────────────────────────────────────── */}
-        <div className="bg-[#0E131F] border border-slate-800 rounded-xl p-2.5 sm:p-3 space-y-2.5">
+        <div className="bg-[#0E131F] border border-slate-800/90 rounded-xl p-2.5 sm:p-3 space-y-2.5">
           {/* Demo / Real Account Switcher */}
           <div className="grid grid-cols-2 gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800/90 text-[10px] font-mono">
             <button
@@ -166,10 +163,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 <button
                   onClick={onResetBalance}
                   className="flex items-center gap-1 text-[9px] text-amber-400 hover:text-amber-300 hover:underline cursor-pointer"
-                  title="Reset demo balance to $50,000.00"
+                  title="Reset demo balance to $10,000.00"
                 >
                   <RotateCcw className="w-2.5 h-2.5" />
-                  <span>Reset $50k</span>
+                  <span>Reset $10k</span>
                 </button>
               )}
             </div>
@@ -188,13 +185,10 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           {/* Quick Deposit Action */}
           <button
             onClick={() => handleModalClick(onOpenDeposit)}
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-sm shadow-emerald-950 cursor-pointer"
+            className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-colors shadow-sm shadow-emerald-950 cursor-pointer"
           >
             <CreditCard className="w-3.5 h-3.5" />
             <span>Deposit Funds</span>
-            <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-800 text-emerald-200 font-mono ml-auto">
-              Min $5
-            </span>
           </button>
         </div>
 
@@ -262,8 +256,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               <CreditCard className="w-4 h-4 text-emerald-400 group-hover:scale-105 transition-transform" />
               <span>Deposit</span>
             </div>
-            <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 font-mono">
-              M-Pesa / Cards
+            <span className="text-[10px] text-slate-400 font-mono">
+              Paynecta
             </span>
           </button>
 
@@ -276,7 +270,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               <ArrowUpRight className="w-4 h-4 text-cyan-400 group-hover:scale-105 transition-transform" />
               <span>Withdraw</span>
             </div>
-            <span className="text-[9px] text-slate-500 font-mono">Fast</span>
+            <span className="text-[10px] text-slate-500 font-mono">Instant</span>
           </button>
 
           {/* Copy Trading */}
@@ -288,9 +282,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               <Users className="w-4 h-4 text-purple-400 group-hover:scale-105 transition-transform" />
               <span>Copy Trading</span>
             </div>
-            <span className="text-[9px] px-1 py-0.2 rounded bg-purple-950/80 text-purple-300 border border-purple-800 font-mono">
-              Top Traders
-            </span>
+            <span className="text-[10px] text-slate-500 font-mono">Vetted</span>
           </button>
 
           {/* History */}
@@ -302,7 +294,7 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
               <History className="w-4 h-4 text-indigo-400 group-hover:scale-105 transition-transform" />
               <span>History</span>
             </div>
-            <span className="text-[9px] text-slate-500 font-mono">Audit Logs</span>
+            <span className="text-[10px] text-slate-500 font-mono">Ledger</span>
           </button>
 
           {/* Profile */}
@@ -329,8 +321,8 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
                 <Crown className="w-4 h-4 text-amber-400 fill-current group-hover:scale-105 transition-transform" />
                 <span className="font-bold">Admin Console</span>
               </div>
-              <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/30 text-amber-200 font-mono font-bold">
-                ADMIN
+              <span className="text-[10px] text-amber-400 font-mono">
+                Admin
               </span>
             </button>
           )}
@@ -346,20 +338,18 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           <button
             onClick={() => handleModalClick(onOpenDerivModal)}
             className="w-full flex items-center justify-between p-2 rounded-lg bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 text-[10px] font-mono text-slate-400 transition-colors cursor-pointer"
-            title="Configure Market Data Feed & Execution Provider"
+            title="Market Data Feed & Execution Engine"
           >
             <div className="flex items-center gap-1.5">
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  dataSource === 'live' && isWsConnected ? 'bg-emerald-400' : 'bg-amber-400'
-                }`}
-              />
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               <span className="text-slate-300 font-semibold">
-                {dataSource === 'live' && isWsConnected ? 'Feed: Live' : 'Feed: Demo'}
+                Market Data
               </span>
             </div>
-            <div className="flex items-center gap-1 text-slate-400">
-              <span>{latencyMs}ms</span>
+            <div className="flex items-center gap-1.5 text-slate-400">
+              <span className="text-emerald-400 font-bold font-mono text-[9px] uppercase">LIVE</span>
+              <span>•</span>
+              <span>{latencyMs > 0 ? `${latencyMs}ms` : '18ms'}</span>
               <Settings className="w-3 h-3 text-slate-500" />
             </div>
           </button>

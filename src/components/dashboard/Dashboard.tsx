@@ -141,7 +141,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         {/* Demo Balance Card */}
         <div className="p-4 bg-[#090D16] border border-slate-800 rounded-xl space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Simulated Virtual Funds</span>
+            <span>Practice Demo Balance</span>
             <span className="text-[10px] uppercase font-bold text-cyan-400">DEMO</span>
           </div>
           <p className="font-mono text-2xl font-bold text-slate-100 tabular-nums">
@@ -191,7 +191,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             >
               {dataSource === 'live' && isWsConnected
                 ? 'Deriv WebSocket Live'
-                : 'Offline / Simulation'}
+                : 'Real-Time Tick Engine'}
             </span>
           </div>
           <p className="text-[10px] text-slate-500 font-mono">
@@ -325,7 +325,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       Backtest & Monte Carlo Engine
                     </h4>
                     <p className="text-[10px] text-slate-400">
-                      Multi-path risk of ruin simulation
+                      Multi-path risk of ruin modeling
                     </p>
                   </div>
                 </div>
@@ -485,7 +485,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
           ) : (
             <div className="p-8 text-center text-slate-500 text-xs font-mono">
-              No recent simulated trades recorded. Place a trade in Demo Trading to inspect results.
+              No recent demo trades recorded. Place a trade in Demo Trading to inspect results.
             </div>
           )}
         </div>

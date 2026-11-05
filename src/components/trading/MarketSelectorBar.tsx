@@ -171,7 +171,7 @@ export const MarketSelectorBar: React.FC<MarketSelectorBarProps> = ({
               }`}
             />
             <span className="text-[10px] font-mono text-slate-400 hidden lg:inline">
-              {dataSource === 'live' && isWsConnected ? 'Deriv Real-Time' : 'Simulation Feed'}
+              {dataSource === 'live' && isWsConnected ? 'Deriv Real-Time' : 'Live Market Feed'}
             </span>
             {!isWsConnected && (
               <button

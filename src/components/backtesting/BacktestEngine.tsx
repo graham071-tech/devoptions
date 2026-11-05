@@ -347,9 +347,9 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
                   </div>
                 </div>
 
-                {/* Net Simulated Profit */}
+                {/* Net Strategy Profit */}
                 <div className="p-3.5 bg-[#090D16] border border-slate-800 rounded-xl space-y-1">
-                  <span className="text-[11px] text-slate-400">Net Simulated P&L</span>
+                  <span className="text-[11px] text-slate-400">Net Strategy P&L</span>
                   <div className="flex items-center gap-1.5">
                     <span
                       className={`font-mono text-xl font-bold ${
@@ -385,7 +385,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
               <div className="bg-[#090D16] border border-slate-800 rounded-xl p-4 space-y-3">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                   <h4 className="font-semibold text-slate-100 text-xs">
-                    Simulated Balance Over Trade Sequence
+                    Strategy Balance Over Trade Sequence
                   </h4>
                   <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400">
                     <span>Initial: ${backtestResult.initialBalance}</span>
@@ -420,7 +420,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
               <div className="bg-[#090D16] border border-slate-800 rounded-xl overflow-hidden">
                 <div className="p-3 bg-slate-900/60 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
                   <h4 className="font-semibold text-slate-200">
-                    Simulated Order Log ({backtestResult.trades.length} Trades)
+                    Backtest Order Log ({backtestResult.trades.length} Trades)
                   </h4>
 
                   {/* Filter tabs */}
@@ -511,10 +511,10 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
               </div>
               <div className="max-w-md mx-auto space-y-1.5">
                 <h4 className="font-semibold text-slate-200 text-sm">
-                  Ready to Simulate Strategy Performance
+                  Ready to Evaluate Strategy Performance
                 </h4>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  Configure starting balance, stake sizing, and sample tick sequence on the left, then click "Run Backtest Simulation" to evaluate empirical win rate, drawdown, and Monte Carlo risk of ruin.
+                  Configure starting balance, stake sizing, and sample tick sequence on the left, then click "Run Backtest Analysis" to evaluate empirical win rate, drawdown, and Monte Carlo risk of ruin.
                 </p>
               </div>
             </div>

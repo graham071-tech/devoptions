@@ -410,9 +410,20 @@ class PaynectaService {
     if (Array.isArray(flows) && flows.length > 0) {
       // If a specific tapFlowId is configured in env, check if it matches in the usable list
       if (config.tapFlowId) {
-        const matched = flows.find(
-          (f) => Boolean(f && typeof f === 'object') && (f.id === config.tapFlowId || f.tapflow_id === config.tapFlowId)
-        );
+        const cleanTarget = config.tapFlowId.replace(/^https?:\/\/pay\.paynecta\.co\.ke\//, '').trim();
+        const matched = flows.find((f: any) => {
+          if (!f || typeof f !== 'object') return false;
+          return (
+            f.id === config.tapFlowId ||
+            f.tapflow_id === config.tapFlowId ||
+            f.id === cleanTarget ||
+            f.tapflow_id === cleanTarget ||
+            f.slug === cleanTarget ||
+            f.name?.toLowerCase() === cleanTarget.toLowerCase() ||
+            (typeof f.url === 'string' && f.url.includes(cleanTarget)) ||
+            (typeof f.checkout_url === 'string' && f.checkout_url.includes(cleanTarget))
+          );
+        });
         if (matched && matched.active !== false && matched.status !== 'inactive') {
           const matchedId = (matched.id || matched.tapflow_id || config.tapFlowId).toString().trim();
           if (matchedId) {
@@ -554,6 +565,7 @@ class PaynectaService {
 
     // 8. Assemble Request Body according to Paynecta API documentation
     const requestBody: Record<string, any> = {
+      tapflow: resolvedTapFlowId,
       tapflow_id: resolvedTapFlowId,
       amount: amountSubunits,
       currency: 'KES',

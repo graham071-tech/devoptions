@@ -78,13 +78,13 @@ export const VETTED_COPY_TRADERS: CopyTrader[] = [
 ];
 
 const DEFAULT_PROFILE: UserProfile = {
-  name: 'Alex Vance',
-  email: 'trader@binarypro.site',
+  name: 'Trader',
+  email: 'trader@devoptions.io',
   currency: 'USD',
   demoBalance: 10000.0,
-  realBalance: 150.0, // realistic initial real balance for demo/testing
+  realBalance: 0.0,
   copyTradingAllocated: 0.0,
-  isRealAuthorized: true,
+  isRealAuthorized: false,
   derivAppId: '1089',
   derivToken: '',
   soundEnabled: true,
@@ -94,34 +94,7 @@ const DEFAULT_PROFILE: UserProfile = {
   favorites: ['R_100', '1HZ100V', 'R_75', 'CRASH500'],
 };
 
-const INITIAL_TRANSACTIONS: Transaction[] = [
-  {
-    id: 'tx_init_1',
-    type: 'deposit',
-    method: 'mpesa',
-    amountUSD: 100,
-    amountLocal: 13000,
-    localCurrency: 'KES',
-    feeUSD: 0,
-    netAmountUSD: 100,
-    status: 'completed',
-    reference: 'QHK928172M',
-    createdAt: Date.now() - 86400000 * 2,
-    details: { phone: '+254712345678' },
-  },
-  {
-    id: 'tx_init_2',
-    type: 'deposit',
-    method: 'card',
-    amountUSD: 50,
-    feeUSD: 0,
-    netAmountUSD: 50,
-    status: 'completed',
-    reference: 'CHG_8471928',
-    createdAt: Date.now() - 86400000,
-    details: { cardLast4: '4242', cardBrand: 'Visa' },
-  },
-];
+const INITIAL_TRANSACTIONS: Transaction[] = [];
 
 class StorageService {
   public getUserProfile(): UserProfile {

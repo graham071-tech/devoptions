@@ -24,8 +24,8 @@
       "createdAt": 1793259641336,
       "emailVerified": true,
       "phoneVerified": true,
-      "demoBalance": 100000,
-      "realBalance": 50000,
+      "demoBalance": 10000,
+      "realBalance": 0,
       "fullName": "DevOptions Master Admin",
       "country": "Global Operations"
     },
@@ -39,8 +39,8 @@
       "createdAt": 1793259641402,
       "emailVerified": true,
       "phoneVerified": true,
-      "demoBalance": 100000,
-      "realBalance": 50000,
+      "demoBalance": 10000,
+      "realBalance": 0,
       "fullName": "Francis Graham (Admin)",
       "country": "United States"
     },
@@ -121,8 +121,41 @@
       "userId": "admin_4f5a945e",
       "createdAt": 1793623780880,
       "expiresAt": 1794228580880
+    },
+    {
+      "token": "920dd1c9f23929ce6c176ff2fdfd7762f182884b296a9d9aa4ab09ec29ec0cb7",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793855171808,
+      "expiresAt": 1794459971808
+    },
+    {
+      "token": "f2b8d04d56f7e383761df5448fe441c32bc882f7aae445d1ab43b26d7e174d75",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793855180432,
+      "expiresAt": 1794459980432
+    },
+    {
+      "token": "60ac0a15c7542edd56da4db4ca76747d203a0c17c88a857086abd3e9b4eae010",
+      "userId": "admin_4f5a945e",
+      "createdAt": 1793855189457,
+      "expiresAt": 1794459989457
     }
   ],
   "trades": [],
-  "deposits": []
+  "deposits": [
+    {
+      "id": "dep_1793855189641_8b59f5a9",
+      "userId": "admin_4f5a945e",
+      "merchantReference": "DO-DEP-1793855189469-D90CEA",
+      "amountKes": 650,
+      "amountSubunits": 65000,
+      "amountUsd": 5,
+      "currency": "KES",
+      "sessionId": "chk_326ceb32321c34f7140eb47f36f69aca",
+      "checkoutUrl": "https://pay.paynecta.co.ke/s/chk_326ceb32321c34f7140eb47f36f69aca#e75509683d268bcff5a31003b3d55608",
+      "status": "pending",
+      "createdAt": 1793855189641,
+      "updatedAt": 1793855189641
+    }
+  ]
 }

@@ -50,7 +50,7 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({
   if (data.length <= 1) {
     return (
       <div className="h-52 flex items-center justify-center text-slate-500 text-xs font-mono">
-        Run simulation to generate simulated equity trajectory curve
+        Run backtest to generate performance equity trajectory curve
       </div>
     );
   }

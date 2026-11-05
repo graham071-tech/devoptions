@@ -262,8 +262,8 @@ function seedAdminAccounts() {
       password: 'Admin@DevOptions2026!',
       fullName: 'DevOptions Master Admin',
       country: 'Global Operations',
-      demoBalance: 100000.0,
-      realBalance: 50000.0,
+      demoBalance: 10000.0,
+      realBalance: 0.0,
     },
     {
       email: 'francisgraham071@gmail.com',
@@ -271,8 +271,8 @@ function seedAdminAccounts() {
       password: 'Admin@DevOptions2026!',
       fullName: 'Francis Graham (Admin)',
       country: 'United States',
-      demoBalance: 100000.0,
-      realBalance: 50000.0,
+      demoBalance: 10000.0,
+      realBalance: 0.0,
     },
   ];
 
@@ -310,6 +310,14 @@ function seedAdminAccounts() {
       if (!existing.emailVerified || !existing.phoneVerified) {
         existing.emailVerified = true;
         existing.phoneVerified = true;
+        changed = true;
+      }
+      if (existing.demoBalance !== 10000.0) {
+        existing.demoBalance = 10000.0;
+        changed = true;
+      }
+      if (existing.realBalance === 50000.0) {
+        existing.realBalance = 0.0;
         changed = true;
       }
       if (changed) {
@@ -1010,8 +1018,8 @@ app.post('/api/admin/create-admin', requireAdmin, (req: AuthenticatedRequest, re
     createdAt: Date.now(),
     emailVerified: true,
     phoneVerified: true,
-    demoBalance: 100000.0,
-    realBalance: 50000.0,
+    demoBalance: 10000.0,
+    realBalance: 0.0,
     fullName: fullName || 'DevOptions Administrator',
     country: 'International',
   };

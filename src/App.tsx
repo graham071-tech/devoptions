@@ -291,18 +291,18 @@ function TradingAppContent() {
       'info',
       `${mode.toUpperCase()} Account Active`,
       mode === 'demo'
-        ? 'Risk-free simulation environment.'
+        ? 'Risk-free practice environment.'
         : 'Live trading mode enabled. Trades utilize real balance.'
     );
   };
 
   const handleResetBalance = () => {
     if (tradingMode === 'demo') {
-      const updated = { ...profile, demoBalance: 50000.0 };
+      const updated = { ...profile, demoBalance: 10000.0 };
       setProfile(updated);
       storage.saveUserProfile(updated);
       audioEffects.playClick();
-      showToast('success', 'Demo Balance Reset', 'Your demo balance is refreshed to $50,000.00 USD.');
+      showToast('success', 'Demo Balance Reset', 'Your demo balance is refreshed to $10,000.00 USD.');
     }
   };
 
@@ -336,7 +336,7 @@ function TradingAppContent() {
   const handleExploreDemo = () => {
     setHasExploredDemo(true);
     sessionStorage.setItem('devoptions_demo_explored', 'true');
-    showToast('info', 'Demo Mode Active', 'Explore all features with $50,000.00 demo balance.');
+    showToast('info', 'Demo Mode Active', 'Explore all features with $10,000.00 demo balance.');
   };
 
   const handleLogout = async () => {

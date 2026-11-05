@@ -120,7 +120,7 @@ export const AVAILABLE_BLOCKS: BlockTemplate[] = [
     type: 'action_trade',
     category: 'action',
     title: 'Execute Contract',
-    desc: 'Places simulated or real binary options contract.',
+    desc: 'Places demo or real binary options contract.',
     defaultParams: { contractType: 'CALL', stake: 10, durationTicks: 5 },
     inputs: [{ id: 'trigger', name: 'Trigger', type: 'boolean' }],
     outputs: [{ id: 'trade_placed', name: 'Trade Done', type: 'action' }],

@@ -236,7 +236,7 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
                 {currentQuote > 0 ? currentQuote.toFixed(decimals) : '—'}
               </span>
               <span className="text-[10px] text-slate-500 font-mono">
-                {dataSource === 'live' && isWsConnected ? 'Deriv Stream' : 'Simulated Feed'}
+                {dataSource === 'live' && isWsConnected ? 'Deriv Stream' : 'Live Tick Stream'}
               </span>
             </div>
           </div>

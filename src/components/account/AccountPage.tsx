@@ -45,7 +45,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
     const updated = { ...profile, demoBalance: newBal };
     storage.saveUserProfile(updated);
     onUpdateProfile(updated);
-    showToast('success', 'Funds Added', `Added $${topUpAmount} simulated USD to demo account.`);
+    showToast('success', 'Funds Added', `Added $${topUpAmount} USD to demo account.`);
   };
 
   const trades = storage.getTradeHistory();
@@ -66,7 +66,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
             </h2>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Overview of virtual demo funds, real Deriv account gateway, and lifetime metrics
+            Overview of practice demo funds, real account gateway, and lifetime metrics
           </p>
         </div>
       </div>
@@ -77,7 +77,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
         <div className="bg-[#090D16] border border-cyan-500/30 rounded-xl p-5 space-y-4 shadow-xl">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">
-              Simulated Virtual Funds
+              Practice Demo Balance
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 font-mono font-bold">
               ACTIVE DEMO

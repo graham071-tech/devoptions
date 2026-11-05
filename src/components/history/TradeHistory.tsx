@@ -105,7 +105,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ onNavigate }) => {
 
   // Clear History
   const handleClearHistory = () => {
-    if (confirm('Clear entire simulated trade history? This action cannot be reversed.')) {
+    if (confirm('Clear entire trade history? This action cannot be reversed.')) {
       storage.clearTradeHistory();
       setTrades([]);
       showToast('info', 'History Cleared', 'All trade records deleted.');
@@ -124,7 +124,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ onNavigate }) => {
             </h2>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Complete record of simulated demo and authorized contracts with entry/exit spot settlements
+            Complete record of demo and authorized live contracts with entry/exit spot settlements
           </p>
         </div>
 

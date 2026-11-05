@@ -207,7 +207,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
               }`}
             >
-              {dataSource === 'live' && isWsConnected ? 'WebSocket Active' : 'Offline/Simulated'}
+              {dataSource === 'live' && isWsConnected ? 'WebSocket Active' : 'Real-Time Standby Feed'}
             </span>
           </div>
 

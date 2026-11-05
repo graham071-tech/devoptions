@@ -548,41 +548,28 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* AI Scanner Quick Trigger Buttons */}
+            {/* Market Scanner Controls */}
             <div className="flex items-center gap-1.5">
-              {/* AI SCANNER Button */}
               <button
                 type="button"
                 onClick={() => handleOpenAIScanner('scan')}
-                className="flex items-center gap-1 px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700 font-mono text-[10px] sm:text-[11px] font-bold uppercase transition-colors cursor-pointer"
-                title="Open AI Market Scanner"
-              >
-                <Sparkles className="w-3 h-3 text-cyan-400" />
-                <span className="hidden xs:inline">AI SCANNER</span>
-                <span className="xs:hidden">SCANNER</span>
-              </button>
-
-              {/* SCAN MARKET Button */}
-              <button
-                type="button"
-                onClick={() => handleOpenAIScanner('scan')}
-                className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 font-mono text-[10px] sm:text-[11px] font-bold uppercase transition-colors cursor-pointer"
-                title="Scan Synthetic Markets for Highest Probability"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700/80 font-mono text-[10px] sm:text-[11px] font-semibold transition-colors cursor-pointer"
+                title="Scan Markets for Statistical Confluence"
               >
                 <Activity className="w-3 h-3 text-cyan-400" />
-                <span className="hidden sm:inline">SCAN MARKET</span>
-                <span className="sm:hidden">SCAN</span>
+                <span className="hidden xs:inline">Market Scanner</span>
+                <span className="xs:hidden">Scanner</span>
               </button>
 
-              {/* SCAN & TRADE FOR ME Button */}
+              {/* Bot Trade Assistant */}
               <button
                 type="button"
                 onClick={() => handleOpenAIScanner('trade_for_me')}
-                className="hidden xl:flex items-center gap-1 px-2 py-1 rounded bg-purple-950 hover:bg-purple-900 text-purple-300 border border-purple-800 font-mono text-[11px] font-bold uppercase transition-colors cursor-pointer"
-                title="AI scans markets, configures optimal bot strategy, and shows confirmation review"
+                className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 hover:bg-purple-950/60 text-purple-300 border border-slate-700/80 hover:border-purple-800 font-mono text-[11px] font-semibold transition-colors cursor-pointer"
+                title="Algorithmic Strategy Assistant"
               >
                 <Bot className="w-3 h-3 text-purple-400" />
-                <span>TRADE FOR ME</span>
+                <span>Auto Trade</span>
               </button>
             </div>
           </div>
@@ -613,13 +600,9 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
           {/* 4. Terminal Metadata / Market Info Bar */}
           <div className="px-3 py-1.5 bg-[#070A0F] border-t border-slate-800/80 flex items-center justify-between text-[10px] font-mono text-slate-500 shrink-0">
             <div className="flex items-center gap-2 sm:gap-3">
-              <span className="flex items-center gap-1 text-slate-400">
-                <span
-                  className={`w-1.5 h-1.5 rounded-full ${
-                    dataSource === 'live' && isWsConnected ? 'bg-emerald-400' : 'bg-amber-400'
-                  }`}
-                />
-                {dataSource === 'live' && isWsConnected ? 'Live Market Feed' : 'Demo Execution'}
+              <span className="flex items-center gap-1.5 text-slate-300">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="font-semibold">Live Market Feed</span>
               </span>
               <span className="text-slate-600 hidden xs:inline">•</span>
               <span className="hidden xs:inline">1 Tick/sec</span>

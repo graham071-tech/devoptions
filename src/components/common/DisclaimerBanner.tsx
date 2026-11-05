@@ -25,7 +25,7 @@ export const DisclaimerBanner: React.FC<DisclaimerBannerProps> = ({ compact = fa
           Regulatory Risk & Statistical Disclosure
         </p>
         <p className="text-slate-400 text-[11px] leading-relaxed">
-          Binary options and synthetic index contracts are speculative financial instruments with a high level of risk. Historical digit frequencies, technical indicator crossovers, and backtest equity curves are computed strictly for analysis and simulation purposes and do not guarantee future outcomes. Real trading involves the risk of capital loss. Always practice in Demo Mode first.
+          Binary options and synthetic index contracts are speculative financial instruments with a high level of risk. Historical digit frequencies, technical indicator crossovers, and backtest equity curves are computed strictly for computational analysis and algorithmic modeling purposes and do not guarantee future outcomes. Real trading involves the risk of capital loss. Always practice in Demo Mode first.
         </p>
       </div>
     </div>

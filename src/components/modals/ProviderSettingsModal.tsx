@@ -72,7 +72,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
       'success',
       'Provider Settings Updated',
       providerType === 'demo'
-        ? 'Active Market Data Source: DevOptions Simulated Feed'
+        ? 'Active Market Data Source: DevOptions Market Feed'
         : `Connecting to ${customWsUrl}`
     );
     onClose();
@@ -150,7 +150,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between pb-1">
-                  <span className="font-bold text-slate-200">Demo Synthetic Feed</span>
+                  <span className="font-bold text-slate-200">Algorithmic Tick Feed</span>
                   <span
                     className={`w-3 h-3 rounded-full border-2 ${
                       providerType === 'demo' ? 'border-cyan-400 bg-cyan-400' : 'border-slate-600'
@@ -158,7 +158,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                   />
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                  Default zero-dependency synthetic market simulation with Brownian motion & full tick precision.
+                  Autonomous high-precision synthetic market data feed with continuous Brownian motion and sub-second tick resolution.
                 </p>
               </div>
 
@@ -212,7 +212,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {/* Option A: Simulated Demo Execution */}
+              {/* Option A: Practice Execution */}
               <div
                 onClick={() => setExecutionMode('simulated')}
                 className={`p-3 rounded-xl border cursor-pointer transition-all ${
@@ -222,7 +222,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between pb-1">
-                  <span className="font-bold text-slate-200">Simulated Demo Engine</span>
+                  <span className="font-bold text-slate-200">Practice Execution Engine</span>
                   <span
                     className={`w-3 h-3 rounded-full border-2 ${
                       executionMode === 'simulated' ? 'border-emerald-400 bg-emerald-400' : 'border-slate-600'
@@ -230,7 +230,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
                   />
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                  Local virtual execution with zero financial risk. Default safe environment for testing bot rules.
+                  Practice trading execution engine with zero financial risk. Standard safe environment for algorithmic testing.
                 </p>
               </div>
 

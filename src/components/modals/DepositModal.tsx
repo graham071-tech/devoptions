@@ -481,6 +481,28 @@ export const DepositModal: React.FC<DepositModalProps> = ({
             {/* VIEW A: READY TO PAY (INPUT AMOUNT) */}
             {displayStatus === 'ready_to_pay' && (
               <form onSubmit={handleCreateSession} className="space-y-4">
+                {/* Available Balance Overview */}
+                <div className="grid grid-cols-2 gap-2 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800">
+                  <div className="space-y-0.5">
+                    <span className="text-[10px] uppercase font-mono text-slate-400">Live Available Balance</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="font-mono text-base font-bold text-emerald-400 tabular-nums">
+                        ${(authUser?.realBalance ?? profile.realBalance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-500">USD</span>
+                    </div>
+                  </div>
+                  <div className="space-y-0.5 border-l border-slate-800/80 pl-2.5">
+                    <span className="text-[10px] uppercase font-mono text-slate-400">Practice Demo Balance</span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="font-mono text-base font-bold text-amber-300 tabular-nums">
+                        ${(authUser?.demoBalance ?? profile.demoBalance ?? 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                      <span className="text-[10px] font-mono text-slate-500">USD</span>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Method Pill */}
                 <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
                   <div className="flex items-center gap-2.5">

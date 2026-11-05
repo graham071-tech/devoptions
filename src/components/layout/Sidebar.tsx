@@ -106,7 +106,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="font-semibold text-slate-300">Practice Demo</span>
               <button
                 onClick={onResetBalance}
-                title="Reset simulated funds to $10,000"
+                title="Reset demo funds to $10,000"
                 className="flex items-center gap-1 text-cyan-400 hover:text-cyan-300 transition-colors font-mono"
               >
                 <RotateCcw className="w-3 h-3" />

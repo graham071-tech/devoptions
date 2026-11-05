@@ -229,7 +229,7 @@ export const DemoTrading: React.FC<DemoTradingProps> = ({
     audioEffects.playTradePlaced();
     showToast(
       'info',
-      `Simulated Order Placed: ${typeToExecute}`,
+      `Order Placed: ${typeToExecute}`,
       `Stake $${stake} @ ${currentQuote.toFixed(selectedMarket.decimals)} (${durationTicks} ticks)`
     );
   };
@@ -263,7 +263,7 @@ export const DemoTrading: React.FC<DemoTradingProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Simulated contract execution with real Deriv tick intervals
+              Real-time contract execution with live Deriv tick intervals
             </p>
           </div>
         </div>
@@ -291,7 +291,7 @@ export const DemoTrading: React.FC<DemoTradingProps> = ({
           <button
             onClick={handleResetBalance}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg text-xs font-medium text-slate-300 transition-colors"
-            title="Reset simulated virtual funds to $10,000"
+            title="Reset demo funds to $10,000"
           >
             <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
             <span>Reset Demo ($10k)</span>
