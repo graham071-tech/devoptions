@@ -1121,7 +1121,7 @@ app.post(
         });
       }
 
-      const appUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+      const appUrl = (process.env.APP_URL || process.env.APP_BASE_URL || (process.env.VERCEL ? `https://${req.get('host')}` : `${req.protocol}://${req.get('host')}`)).replace(/\/+$/, '');
       const merchantReference = `DO-DEP-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
       const amountUsd = Number((amountKes / config.kesPerUsd).toFixed(2));
       const amountSubunits = amountKes * 100;
