@@ -397,8 +397,8 @@ function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?
     devNotice:
       !user.emailVerified || !user.phoneVerified
         ? {
-            emailOtp: !user.emailVerified ? lastEmailOtp || user.emailVerificationCode : undefined,
-            phoneOtp: !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
+            emailOtp: process.env.NODE_ENV !== 'production' && !user.emailVerified ? lastEmailOtp || user.emailVerificationCode : undefined,
+            phoneOtp: process.env.NODE_ENV !== 'production' && !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
             info: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY)
               ? 'Verification code has been dispatched to your registered email.'
               : 'External email service is not yet configured on this server. Use the sandbox OTP code provided below to verify your account.',
@@ -1294,6 +1294,20 @@ app.post(
       const now = Date.now();
 
       if (verification.status === 'succeeded') {
+        if (
+          verification.confirmedAmountKes !== undefined &&
+          Math.round(verification.confirmedAmountKes) !== deposit.amountKes
+        ) {
+          console.error('[Paynecta Amount Mismatch]', {
+            depositId: deposit.id,
+            expectedKes: deposit.amountKes,
+            confirmedKes: verification.confirmedAmountKes,
+          });
+          return res.status(409).json({
+            error: 'The confirmed payment amount does not match this deposit. No balance was credited; support reconciliation is required.',
+          });
+        }
+
         const providerReference =
           verification.providerReference ||
           verification.receiptNumber ||
@@ -1606,13 +1620,33 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       eventType.includes('payment.succeeded') ||
       eventType.includes('checkout.session.completed')
     ) {
+      // Never credit based on a webhook payload alone: independently confirm
+      // the session with Paynecta and compare the paid amount to our own record.
+      const verified = await paynectaService.verifyCheckoutSession(
+        deposit.session_id || '',
+        deposit.merchant_reference
+      );
+      if (verified.status !== 'succeeded') {
+        console.warn('[Paynecta Webhook] Provider API has not independently confirmed success yet.');
+        return res.status(202).json({ received: true, credited: false, note: 'Awaiting independent provider verification.' });
+      }
+      if (
+        verified.confirmedAmountKes !== undefined &&
+        Math.round(verified.confirmedAmountKes) !== Number(deposit.amount_kes)
+      ) {
+        console.error('[Paynecta Webhook] Confirmed amount does not match deposit:', deposit.id);
+        return res.status(409).json({ error: 'Payment amount mismatch; no balance was credited.' });
+      }
+
+      const trustedProviderReference = verified.providerReference || verified.receiptNumber || 'PAYNECTA_VERIFIED';
+      const trustedReceipt = verified.receiptNumber || null;
       const { data: creditResult, error: creditError } = await supabase.rpc(
         'confirm_paynecta_deposit',
         {
           p_deposit_id: deposit.id,
-          p_provider_reference: providerReference || 'PAYNECTA_WEBHOOK',
-          p_receipt_number: providerReference || null,
-          p_confirmed_amount_kes: Number(deposit.amount_kes),
+          p_provider_reference: trustedProviderReference,
+          p_receipt_number: trustedReceipt,
+          p_confirmed_amount_kes: verified.confirmedAmountKes ?? Number(deposit.amount_kes),
           p_source: 'webhook',
         }
       );
