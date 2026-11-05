@@ -171,46 +171,27 @@ function TradingAppContent() {
       setActiveTrades(remainingActive);
       setCompletedTrades((prev) => [...newlyCompleted, ...prev].slice(0, 100));
 
-      let netPnlChange = 0;
-      let totalPayout = 0;
-
+      // Settle authenticated trades atomically in Supabase. Guest demo trades remain local.
       newlyCompleted.forEach((trade) => {
-        netPnlChange += trade.profitLoss;
-        if (trade.status === 'won') {
-          totalPayout += trade.potentialPayout;
+        if (authClient.isAuthenticated()) {
+          authClient.settleTrade(trade).then((balances) => {
+            setProfile((prev) => {
+              const updated = { ...prev, ...balances };
+              storage.saveUserProfile(updated);
+              return updated;
+            });
+          }).catch((error) => {
+            console.error('Could not settle simulated trade on server:', error);
+            showToast('error', 'Settlement Needs Attention', 'The server could not confirm this trade settlement. Please refresh and check your account balance.');
+          });
+        } else if (trade.mode === 'demo' && trade.status === 'won') {
+          setProfile((prev) => {
+            const updated = { ...prev, demoBalance: Number((prev.demoBalance + trade.potentialPayout).toFixed(2)) };
+            storage.saveUserProfile(updated);
+            return updated;
+          });
         }
-      });
-
-      // Update account balance based on active mode
-      const currentMode = tradingMode;
-      const currentProf = profileRef.current;
-
-      if (currentMode === 'demo') {
-        const updatedBalance = Math.max(0, currentProf.demoBalance + totalPayout);
-        setProfile((prev) => {
-          const updated = {
-            ...prev,
-            demoBalance: updatedBalance,
-          };
-          storage.saveUserProfile(updated);
-          return updated;
-        });
-      } else {
-        const updatedBalance = Math.max(0, currentProf.realBalance + totalPayout);
-        setProfile((prev) => {
-          const updated = {
-            ...prev,
-            realBalance: updatedBalance,
-          };
-          storage.saveUserProfile(updated);
-          return updated;
-        });
-      }
-
-      // Persist to storage
-      newlyCompleted.forEach((t) => {
-        storage.addTrade(t);
-        authClient.saveTrade(t).catch((error) => console.warn('Could not sync completed trade:', error));
+        storage.addTrade(trade);
       });
 
       // Audio and toast feedback
@@ -301,7 +282,7 @@ function TradingAppContent() {
       `${mode.toUpperCase()} Account Active`,
       mode === 'demo'
         ? 'Risk-free practice environment.'
-        : 'Live trading mode enabled. Trades utilize real balance.'
+        : 'Simulated contracts use your deposited balance. No broker orders are placed.'
     );
   };
 
