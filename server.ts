@@ -1555,28 +1555,183 @@ app.post('/api/paynecta/cancel-deposit/:id', requireAuth, (req: AuthenticatedReq
 });
 
 // 6. PAYNECTA WEBHOOK RECEIVER (HMAC-SHA256 SIGNED WITH REPLAY PROTECTION)
-app.post('/api/paynecta/webhook', (req: Request, res: Response) => {
-  const signature = (
-    req.headers['paynecta-signature'] ||
-    req.headers['x-paynecta-signature'] ||
-    req.headers['x-signature'] ||
-    ''
-  ) as string;
+// 6. PAYNECTA WEBHOOK RECEIVER (SUPABASE + ATOMIC CREDITING)
+app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
+  try {
+    const signature = (
+      req.headers['paynecta-signature'] ||
+      req.headers['x-paynecta-signature'] ||
+      req.headers['x-signature'] ||
+      ''
+    ) as string;
 
-  const timestamp = (
-    req.headers['paynecta-timestamp'] ||
-    req.headers['x-paynecta-timestamp'] ||
-    ''
-  ) as string;
+    const timestamp = (
+      req.headers['paynecta-timestamp'] ||
+      req.headers['x-paynecta-timestamp'] ||
+      ''
+    ) as string;
 
-  const rawBody = (req as any).rawBody
-    ? (req as any).rawBody.toString('utf-8')
-    : JSON.stringify(req.body);
+    const rawBody = (req as any).rawBody
+      ? (req as any).rawBody.toString('utf-8')
+      : JSON.stringify(req.body);
 
-  const verification = paynectaService.verifyWebhook({
-    rawBody,
-    signatureHeader: signature,
-    timestampHeader: timestamp,
+    const verification = paynectaService.verifyWebhook({
+      rawBody,
+      signatureHeader: signature,
+      timestampHeader: timestamp,
+    });
+
+    const config = paynectaService.getConfig();
+
+    if (config.webhookSecret && !verification.isValid) {
+      console.warn('[Paynecta Webhook] Verification failed:', verification.reason);
+      return res.status(401).json({
+        error: 'Invalid webhook signature or expired timestamp.',
+      });
+    }
+
+    if (!config.webhookSecret) {
+      console.error('[Paynecta Webhook] Rejected: webhook secret is not configured.');
+      return res.status(503).json({
+        error: 'Webhook verification is not configured.',
+      });
+    }
+
+    const event = req.body || {};
+
+    const merchantReference =
+      event.merchant_reference ||
+      event.data?.merchant_reference ||
+      event.payment?.merchant_reference;
+
+    const sessionId =
+      event.session_id ||
+      event.id ||
+      event.data?.session_id ||
+      event.data?.id;
+
+    const providerReference =
+      event.receipt_number ||
+      event.data?.receipt_number ||
+      event.transaction_id ||
+      event.data?.transaction_id ||
+      event.payment?.reference;
+
+    if (!merchantReference && !sessionId && !providerReference) {
+      return res.status(400).json({
+        error: 'Missing merchant reference or session ID in webhook event.',
+      });
+    }
+
+    const supabase = getSupabaseClient();
+
+    let depositQuery = supabase.from('deposits').select('*');
+
+    if (merchantReference) {
+      depositQuery = depositQuery.eq('merchant_reference', merchantReference);
+    } else if (sessionId) {
+      depositQuery = depositQuery.eq('session_id', sessionId);
+    } else {
+      depositQuery = depositQuery.eq('provider_reference', providerReference);
+    }
+
+    const { data: deposit, error: depositError } = await depositQuery.maybeSingle();
+
+    if (depositError) {
+      console.error('[Paynecta Webhook] Supabase lookup error:', depositError);
+      return res.status(500).json({ error: 'Could not locate payment record.' });
+    }
+
+    if (!deposit) {
+      console.warn('[Paynecta Webhook] No matching Supabase deposit:', merchantReference || sessionId);
+      return res.json({ received: true, note: 'Deposit not found.' });
+    }
+
+    const eventType = String(event.event || event.type || '').toLowerCase();
+
+    const eventStatus = String(
+      event.status ||
+      event.data?.status ||
+      event.payment?.status ||
+      ''
+    ).toLowerCase();
+
+    if (
+      eventStatus === 'succeeded' ||
+      eventStatus === 'completed' ||
+      eventStatus === 'paid' ||
+      eventType.includes('payment.succeeded') ||
+      eventType.includes('checkout.session.completed')
+    ) {
+      const { data: creditResult, error: creditError } = await supabase.rpc(
+        'confirm_paynecta_deposit',
+        {
+          p_deposit_id: deposit.id,
+          p_provider_reference: providerReference || 'PAYNECTA_WEBHOOK',
+          p_receipt_number: providerReference || null,
+          p_confirmed_amount_kes: Number(deposit.amount_kes),
+          p_source: 'webhook',
+        }
+      );
+
+      if (creditError || !creditResult?.success) {
+        console.error('[Paynecta Webhook] Atomic credit failed:', creditError || creditResult);
+        return res.status(500).json({
+          error: 'Payment received but deposit crediting needs reconciliation.',
+        });
+      }
+
+      console.log(
+        `[Paynecta Webhook] Deposit ${deposit.id} processed. Already credited: ${creditResult.alreadyCredited}`
+      );
+    } else if (
+      eventStatus === 'failed' ||
+      eventStatus === 'declined' ||
+      eventType.includes('payment.failed')
+    ) {
+      const { error } = await supabase
+        .from('deposits')
+        .update({
+          status: 'failed',
+          failure_reason:
+            event.failure_reason ||
+            event.data?.failure_reason ||
+            'Payment failed.',
+          updated_at: Date.now(),
+        })
+        .eq('id', deposit.id)
+        .neq('status', 'succeeded');
+
+      if (error) {
+        console.error('[Paynecta Webhook] Failed status update:', error);
+        return res.status(500).json({ error: 'Could not update deposit status.' });
+      }
+    } else if (
+      eventStatus === 'cancelled' ||
+      eventType.includes('payment.cancelled')
+    ) {
+      const { error } = await supabase
+        .from('deposits')
+        .update({
+          status: 'cancelled',
+          failure_reason: 'Payment was cancelled by user.',
+          updated_at: Date.now(),
+        })
+        .eq('id', deposit.id)
+        .neq('status', 'succeeded');
+
+      if (error) {
+        console.error('[Paynecta Webhook] Cancel status update:', error);
+        return res.status(500).json({ error: 'Could not update deposit status.' });
+      }
+    }
+
+    return res.json({ received: true });
+  } catch (err: any) {
+    console.error('[Paynecta Webhook Error]:', err);
+    return res.status(500).json({ error: 'Webhook processing failed.' });
+  }
+});
   });
 
   const config = paynectaService.getConfig();
