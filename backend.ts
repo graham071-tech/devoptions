@@ -852,6 +852,7 @@ app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: 
 app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { trade, mode } = req.body || {};
+    if (mode === 'real') return res.status(503).json({ error: 'Real-balance simulation is paused until trade outcomes can be verified by the server.' });
     if (!trade || typeof trade !== 'object' || Array.isArray(trade)
       || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128
       || !['demo', 'real'].includes(mode) || trade.mode !== mode
