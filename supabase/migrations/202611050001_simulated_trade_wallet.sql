@@ -23,7 +23,10 @@ begin
      or jsonb_typeof(p_trade) <> 'object'
      or coalesce(p_trade->>'id', '') = ''
      or coalesce(p_trade->>'status', '') <> 'active'
-     or coalesce((p_trade->>'stake')::numeric, -1) <> p_stake then
+     or coalesce((p_trade->>'stake')::numeric, -1) <> p_stake
+     or coalesce((p_trade->>'payoutRate')::numeric, -1) <= 0
+     or coalesce((p_trade->>'payoutRate')::numeric, 2) > 1
+     or coalesce((p_trade->>'potentialPayout')::numeric, -1) <> round(p_stake * (1 + (p_trade->>'payoutRate')::numeric), 2) then
     raise exception 'Invalid simulated trade';
   end if;
 
