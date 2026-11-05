@@ -1,6 +1,4 @@
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 
 export interface PaynectaConfig {
   baseUrl: string;
@@ -96,30 +94,15 @@ class PaynectaService {
   private discoveredTapFlowId: string | null = null;
 
   /**
-   * Securely saves the discovered TapFlow ID in memory, process.env, and .env configuration
+   * Cache a discovered TapFlow ID for this server instance.
+   * Serverless filesystems are ephemeral/read-only, so persist it in deployment
+   * environment configuration rather than attempting to write a local .env file.
    */
   public saveDiscoveredTapFlowId(flowId: string): void {
     const cleanId = String(flowId || '').trim();
     if (!cleanId) return;
     this.discoveredTapFlowId = cleanId;
-    if (typeof process !== 'undefined' && process.env) {
-      process.env.PAYNECTA_TAPFLOW_ID = cleanId;
-    }
-    try {
-      const envPath = path.resolve(process.cwd(), '.env');
-      if (fs.existsSync(envPath)) {
-        let envContent = fs.readFileSync(envPath, 'utf-8');
-        if (envContent.includes('PAYNECTA_TAPFLOW_ID=')) {
-          envContent = envContent.replace(/PAYNECTA_TAPFLOW_ID=.*/g, `PAYNECTA_TAPFLOW_ID=${cleanId}`);
-        } else {
-          envContent += `\nPAYNECTA_TAPFLOW_ID=${cleanId}\n`;
-        }
-        fs.writeFileSync(envPath, envContent, 'utf-8');
-        console.log(`[Paynecta Service] Successfully saved discovered TapFlow ID ${cleanId} into configuration.`);
-      }
-    } catch (err: any) {
-      console.warn('[Paynecta Service] Could not persist PAYNECTA_TAPFLOW_ID to .env file:', err.message);
-    }
+    process.env.PAYNECTA_TAPFLOW_ID = cleanId;
   }
 
   public getConfig(): PaynectaConfig {
