@@ -900,20 +900,24 @@ app.post('/api/user/trades', requireAuth, rateLimitMiddleware(60, 60000), async 
 app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
     const supabase = getSupabaseClient();
-    const [usersResult, sessionsResult, tradesResult] = await Promise.all([
-      supabase.from('users').select('id,role,email_verified,phone_verified', { count: 'exact' }),
-      supabase.from('sessions').select('token', { count: 'exact' }).gt('expires_at', Date.now()),
+    const [usersResult, verifiedResult, adminsResult, sessionsResult, tradesResult] = await Promise.all([
+      supabase.from('users').select('id', { count: 'exact', head: true }),
+      supabase.from('users').select('id', { count: 'exact', head: true }).eq('email_verified', true).eq('phone_verified', true),
+      supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin'),
+      supabase.from('sessions').select('token', { count: 'exact', head: true }).gt('expires_at', Date.now()),
       supabase.from('trades').select('trade_data'),
     ]);
-    if (usersResult.error || sessionsResult.error || tradesResult.error) throw usersResult.error || sessionsResult.error || tradesResult.error;
+    const queryError = usersResult.error || verifiedResult.error || adminsResult.error || sessionsResult.error || tradesResult.error;
+    if (queryError) throw queryError;
     const trades = (tradesResult.data || []).map((x: any) => x.trade_data || {});
     return res.json({ metrics: {
       totalUsers: usersResult.count || 0,
-      verifiedUsers: (usersResult.data || []).filter((u: any) => u.email_verified && u.phone_verified).length,
-      activeSessions: sessionsResult.count || 0, totalTrades: trades.length,
+      verifiedUsers: verifiedResult.count || 0,
+      activeSessions: sessionsResult.count || 0,
+      totalTrades: trades.length,
       totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
       netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profitLoss ?? t.profit) || 0), 0).toFixed(2)),
-      adminsCount: (usersResult.data || []).filter((u: any) => u.role === 'admin').length,
+      adminsCount: adminsResult.count || 0,
     }, defaultAccounts: []});
   } catch (error) {
     console.error('[Supabase Admin Overview Error]:', error);
