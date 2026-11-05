@@ -849,6 +849,76 @@ app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: 
     return res.status(500).json({ error: 'Could not load trade history.' });
   }
 });
+app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { trade, mode } = req.body || {};
+    if (!trade || typeof trade !== 'object' || Array.isArray(trade)
+      || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128
+      || !['demo', 'real'].includes(mode) || trade.mode !== mode
+      || trade.status !== 'active' || !Number.isFinite(trade.stake)
+      || trade.stake <= 0 || trade.stake > 1000000
+      || !Number.isFinite(trade.potentialPayout) || trade.potentialPayout < trade.stake
+      || !Number.isFinite(trade.entryPrice) || !Number.isFinite(trade.durationTicks)
+      || trade.durationTicks < 1 || trade.durationTicks > 10000) {
+      return res.status(400).json({ error: 'Invalid simulated trade details.' });
+    }
+    const { data, error } = await getSupabaseClient().rpc('place_simulated_trade', {
+      p_user_id: req.user!.id,
+      p_trade: trade,
+      p_mode: mode,
+      p_stake: trade.stake,
+    });
+    if (error) {
+      if (/Insufficient balance/i.test(error.message)) return res.status(409).json({ error: 'Insufficient balance.' });
+      if (/already exists/i.test(error.message)) return res.status(409).json({ error: 'This trade has already been placed.' });
+      throw error;
+    }
+    const { data: userRow, error: userError } = await getSupabaseClient()
+      .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+    if (userError) throw userError;
+    return res.status(201).json({ success: true, trade, balances: {
+      demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance),
+    }, wallet: data });
+  } catch (error) {
+    console.error('[Simulated Trade Placement Error]:', error);
+    return res.status(500).json({ error: 'Could not place simulated trade.' });
+  }
+});
+
+app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(60, 60000), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tradeId = String(req.params.tradeId || '');
+    const settlement = req.body;
+    if (!tradeId || tradeId.length > 128 || !settlement || typeof settlement !== 'object'
+      || !['won', 'lost'].includes(settlement.status)
+      || !Number.isFinite(settlement.profitLoss)
+      || !Number.isFinite(settlement.exitPrice)
+      || !Number.isFinite(settlement.exitTime)
+      || !Array.isArray(settlement.ticksRecorded) || settlement.ticksRecorded.length > 10000) {
+      return res.status(400).json({ error: 'Invalid simulated settlement details.' });
+    }
+    const { data, error } = await getSupabaseClient().rpc('settle_simulated_trade', {
+      p_user_id: req.user!.id,
+      p_trade_id: tradeId,
+      p_settlement: settlement,
+    });
+    if (error) {
+      if (/not found/i.test(error.message)) return res.status(404).json({ error: 'Trade not found.' });
+      if (/already settled/i.test(error.message)) return res.status(409).json({ error: 'Trade has already been settled.' });
+      throw error;
+    }
+    const { data: userRow, error: userError } = await getSupabaseClient()
+      .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+    if (userError) throw userError;
+    return res.json({ success: true, balances: {
+      demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance),
+    }, wallet: data });
+  } catch (error) {
+    console.error('[Simulated Trade Settlement Error]:', error);
+    return res.status(500).json({ error: 'Could not settle simulated trade.' });
+  }
+});
+
 app.post('/api/user/trades', requireAuth, rateLimitMiddleware(60, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const trade = req.body;
