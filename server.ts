@@ -1322,6 +1322,7 @@ app.get('/api/paynecta/deposits', requireAuth, async (req: AuthenticatedRequest,
 });
 
 // 4. VERIFY DEPOSIT STATUS (IDEMPOTENT INDEPENDENT RECONCILIATION)
+// 4. VERIFY DEPOSIT STATUS (SUPABASE + ATOMIC CREDITING)
 app.post(
   '/api/paynecta/verify-deposit/:id',
   requireAuth,
@@ -1330,137 +1331,190 @@ app.post(
     try {
       const depositId = req.params.id;
       const user = req.user!;
+      const supabase = getSupabaseClient();
 
-      if (!db.deposits) db.deposits = [];
-      const deposit = db.deposits.find((d) => d.id === depositId);
+      const { data: row, error: fetchError } = await supabase
+        .from('deposits')
+        .select('*')
+        .eq('id', depositId)
+        .maybeSingle();
 
-      if (!deposit) {
+      if (fetchError) {
+        console.error('[Supabase Deposit Fetch Error]:', fetchError);
+        return res.status(500).json({ error: 'Could not load deposit.' });
+      }
+
+      if (!row) {
         return res.status(404).json({ error: 'Deposit record not found.' });
       }
 
-      if (deposit.userId !== user.id && user.role !== 'admin') {
-        return res.status(403).json({ error: 'Access denied: deposit belongs to another user.' });
+      if (row.user_id !== user.id && user.role !== 'admin') {
+        return res.status(403).json({ error: 'Access denied.' });
       }
 
-      // IDEMPOTENCY CHECK: If already confirmed, return success without duplicate crediting
+      const deposit: DepositRecord = {
+        id: row.id,
+        userId: row.user_id,
+        merchantReference: row.merchant_reference,
+        amountKes: Number(row.amount_kes),
+        amountSubunits: Number(row.amount_subunits),
+        amountUsd: Number(row.amount_usd),
+        currency: row.currency,
+        sessionId: row.session_id,
+        checkoutUrl: row.checkout_url,
+        providerReference: row.provider_reference,
+        receiptNumber: row.receipt_number,
+        status: row.status,
+        failureReason: row.failure_reason,
+        confirmedAmountKes: row.confirmed_amount_kes == null
+          ? undefined
+          : Number(row.confirmed_amount_kes),
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at),
+        confirmedAt: row.confirmed_at == null
+          ? undefined
+          : Number(row.confirmed_at),
+      };
+
       if (deposit.status === 'succeeded') {
-        const currentUser = db.users.find((u) => u.id === deposit.userId) || user;
+        const { data: account } = await supabase
+          .from('users')
+          .select('real_balance')
+          .eq('id', deposit.userId)
+          .maybeSingle();
+
         return res.json({
           status: 'succeeded',
           alreadyCredited: true,
           deposit,
-          realBalance: currentUser.realBalance,
-          message: 'Deposit already confirmed and credited to balance.',
+          realBalance: Number(account?.real_balance ?? 0),
+          message: 'Deposit already confirmed and credited.',
         });
       }
 
-      // Perform server-to-server verification with Paynecta API
       const verification = await paynectaService.verifyCheckoutSession(
         deposit.sessionId || '',
         deposit.merchantReference
       );
 
-      deposit.updatedAt = Date.now();
+      const now = Date.now();
 
       if (verification.status === 'succeeded') {
-        // Prevent concurrent double crediting if already marked by webhook
-        const freshRecord = db.deposits?.find((d) => d.id === depositId);
-        if (freshRecord && freshRecord.status === 'succeeded') {
-          const currentUser = db.users.find((u) => u.id === deposit.userId) || user;
-          return res.json({
-            status: 'succeeded',
-            alreadyCredited: true,
-            deposit: freshRecord,
-            realBalance: currentUser.realBalance,
-            message: 'Deposit already confirmed and credited to balance.',
+        const providerReference =
+          verification.providerReference ||
+          verification.receiptNumber ||
+          'PAYNECTA_VERIFIED';
+
+        const receiptNumber =
+          verification.receiptNumber ||
+          verification.providerReference ||
+          null;
+
+        const { data: creditResult, error: creditError } = await supabase.rpc(
+          'confirm_paynecta_deposit',
+          {
+            p_deposit_id: deposit.id,
+            p_provider_reference: providerReference,
+            p_receipt_number: receiptNumber,
+            p_confirmed_amount_kes:
+              verification.confirmedAmountKes ?? deposit.amountKes,
+            p_source: 'verification',
+          }
+        );
+
+        if (creditError) {
+          console.error('[Atomic Deposit Credit Error]:', creditError);
+          return res.status(500).json({
+            error: 'Payment was verified, but balance crediting needs reconciliation.',
           });
         }
 
-        deposit.status = 'succeeded';
-        deposit.confirmedAmountKes = verification.confirmedAmountKes || deposit.amountKes;
-        deposit.providerReference =
-          verification.providerReference || verification.receiptNumber || 'PAYNECTA_VERIFIED';
-        deposit.receiptNumber = verification.receiptNumber || verification.providerReference;
-        deposit.confirmedAt = Date.now();
-
-        // Atomically update user's platform balance
-        const targetUser = db.users.find((u) => u.id === deposit.userId);
-        if (targetUser) {
-          targetUser.realBalance = Number((targetUser.realBalance + deposit.amountUsd).toFixed(2));
+        if (!creditResult?.success) {
+          console.error('[Atomic Deposit Credit Rejected]:', creditResult);
+          return res.status(500).json({
+            error: creditResult?.error || 'Could not confirm deposit credit.',
+          });
         }
 
-        // Add ledger record
-        const txRecord = {
-          id: `tx_${deposit.id}`,
-          userId: deposit.userId,
-          type: 'deposit',
-          method: 'mpesa',
-          amountUSD: deposit.amountUsd,
-          amountLocal: deposit.amountKes,
-          localCurrency: 'KES',
-          feeUSD: 0,
-          netAmountUSD: deposit.amountUsd,
-          status: 'completed',
-          reference: deposit.providerReference || deposit.merchantReference,
-          createdAt: Date.now(),
-          details: {
-            merchantReference: deposit.merchantReference,
-            providerReceipt: deposit.receiptNumber,
-            gateway: 'Paynecta M-Pesa',
-          },
+        const updatedDeposit: DepositRecord = {
+          ...deposit,
+          status: 'succeeded',
+          providerReference,
+          receiptNumber: receiptNumber || undefined,
+          confirmedAmountKes:
+            verification.confirmedAmountKes ?? deposit.amountKes,
+          confirmedAt: now,
+          updatedAt: now,
         };
-
-        if (!db.trades) db.trades = [];
-        db.trades.push(txRecord);
-
-        saveDatabase(db);
 
         return res.json({
           status: 'succeeded',
-          deposit,
-          realBalance: targetUser?.realBalance ?? user.realBalance,
-          message: `Payment confirmed! KES ${deposit.amountKes.toLocaleString()} received. Real balance credited with +$${deposit.amountUsd.toFixed(2)} USD.`,
+          alreadyCredited: creditResult.alreadyCredited,
+          deposit: updatedDeposit,
+          realBalance: Number(creditResult.realBalance),
+          message: creditResult.alreadyCredited
+            ? 'Deposit was already credited.'
+            : `Payment confirmed! KES ${deposit.amountKes.toLocaleString()} received. Real balance credited with +$${deposit.amountUsd.toFixed(2)} USD.`,
         });
       }
 
-      if (verification.status === 'failed') {
-        deposit.status = 'failed';
-        deposit.failureReason = verification.failureReason || 'Payment declined or refused by provider.';
-        saveDatabase(db);
+      if (
+        verification.status === 'failed' ||
+        verification.status === 'cancelled'
+      ) {
+        const failureReason =
+          verification.failureReason ||
+          (verification.status === 'failed'
+            ? 'Payment declined or refused by provider.'
+            : 'Payment was cancelled.');
+
+        const { error: updateError } = await supabase
+          .from('deposits')
+          .update({
+            status: verification.status,
+            failure_reason: failureReason,
+            updated_at: now,
+          })
+          .eq('id', deposit.id)
+          .neq('status', 'succeeded');
+
+        if (updateError) {
+          console.error('[Deposit Status Update Error]:', updateError);
+          return res.status(500).json({
+            error: 'Could not update deposit status.',
+          });
+        }
 
         return res.json({
-          status: 'failed',
-          deposit,
-          message: deposit.failureReason,
+          status: verification.status,
+          deposit: {
+            ...deposit,
+            status: verification.status,
+            failureReason,
+            updatedAt: now,
+          },
+          message: failureReason,
         });
       }
 
-      if (verification.status === 'cancelled') {
-        deposit.status = 'cancelled';
-        deposit.failureReason = verification.failureReason || 'Payment was cancelled.';
-        saveDatabase(db);
-
-        return res.json({
-          status: 'cancelled',
-          deposit,
-          message: 'Payment was cancelled.',
-        });
-      }
+      await supabase
+        .from('deposits')
+        .update({ updated_at: now })
+        .eq('id', deposit.id);
 
       if (verification.status === 'verification_delayed') {
         return res.json({
           status: 'verification_delayed',
-          deposit,
+          deposit: { ...deposit, updatedAt: now },
           message:
             verification.failureReason ||
-            'Verification is delayed. Paynecta is reconciling settlement with network.',
+            'Verification is delayed. Paynecta is reconciling settlement with the network.',
         });
       }
 
-      // Default: Still awaiting payment
       return res.json({
         status: 'pending',
-        deposit,
+        deposit: { ...deposit, updatedAt: now },
         message: 'Awaiting customer approval and M-Pesa network confirmation.',
       });
     } catch (err: any) {
@@ -1471,6 +1525,7 @@ app.post(
       });
     }
   }
+);
 );
 
 // 5. CANCEL PENDING DEPOSIT
