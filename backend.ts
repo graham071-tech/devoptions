@@ -750,11 +750,11 @@ async function verifyContact(req: AuthenticatedRequest, res: Response, type: 'em
     return res.status(500).json({ error: 'Verification service is unavailable.' });
   }
 }
-app.post('/api/auth/verify-email', requireAuth, (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'email'));
-app.post('/api/auth/verify-phone', requireAuth, (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'phone'));
+app.post('/api/auth/verify-email', requireAuth, rateLimitMiddleware(10, 60000), (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'email'));
+app.post('/api/auth/verify-phone', requireAuth, rateLimitMiddleware(10, 60000), (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'phone'));
 
 // 7. RESEND VERIFICATION CODE
-app.post('/api/auth/resend-code', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/resend-code', requireAuth, rateLimitMiddleware(5, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const type = req.body?.type === 'phone' ? 'phone' : 'email';
     const user = req.user!;
