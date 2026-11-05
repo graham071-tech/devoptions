@@ -859,7 +859,7 @@ class PaynectaService {
       (data.id != null ? String(data.id) : undefined);
 
     const receiptNumber =
-      (data.payment && typeof data.payment === 'object' && data.payment.receipt_number) ||
+      (data.payment && typeof data.payment === 'object' && (data.payment.receipt_number || data.payment.receipt)) ||
       data.receipt_number ||
       data.mpesa_receipt ||
       data.receipt;
@@ -934,56 +934,34 @@ class PaynectaService {
     }
 
     const { rawBody, signatureHeader, timestampHeader } = params;
-
-    if (!signatureHeader) {
-      return { isValid: false, reason: 'Missing Paynecta signature header.' };
+    if (!signatureHeader || !timestampHeader) {
+      return { isValid: false, reason: 'Missing Paynecta signature or timestamp header.' };
     }
 
-    // Replay attack prevention: validate timestamp tolerance (within 300s / 5 minutes)
-    if (timestampHeader) {
-      const ts = Number(timestampHeader);
-      if (!isNaN(ts) && ts > 0) {
-        const tsMs = ts > 10000000000 ? ts : ts * 1000;
-        const nowMs = Date.now();
-        const diffSeconds = Math.abs(nowMs - tsMs) / 1000;
-        if (diffSeconds > 300) {
-          return {
-            isValid: false,
-            reason: `Webhook timestamp expired. Difference of ${Math.round(diffSeconds)}s exceeds 300s tolerance limit.`,
-          };
-        }
-      }
+    const timestampSeconds = Number(timestampHeader);
+    if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+      return { isValid: false, reason: 'Invalid Paynecta timestamp header.' };
+    }
+    const ageSeconds = Math.abs(Date.now() / 1000 - timestampSeconds);
+    if (ageSeconds > 300) {
+      return { isValid: false, reason: 'Webhook timestamp is outside the 5-minute acceptance window.' };
     }
 
     try {
-      const sigClean = signatureHeader.replace(/^sha256=/, '').replace(/^v1=/, '').trim();
-      const receivedBuf = Buffer.from(sigClean, 'hex');
-
-      // Schema A: HMAC-SHA256 of `${timestampHeader}.${rawBody}`
-      if (timestampHeader) {
-        const hmacWithTs = crypto.createHmac('sha256', config.webhookSecret);
-        const computedWithTs = hmacWithTs.update(`${timestampHeader}.${rawBody}`).digest('hex');
-        const expectedBufWithTs = Buffer.from(computedWithTs, 'hex');
-        if (
-          expectedBufWithTs.length === receivedBuf.length &&
-          crypto.timingSafeEqual(expectedBufWithTs, receivedBuf)
-        ) {
-          return { isValid: true };
-        }
-      }
-
-      // Schema B: HMAC-SHA256 of rawBody
-      const hmacRaw = crypto.createHmac('sha256', config.webhookSecret);
-      const computedRaw = hmacRaw.update(rawBody).digest('hex');
-      const expectedBufRaw = Buffer.from(computedRaw, 'hex');
-
+      // Paynecta signs exactly: "<timestamp>.<raw request body>".
+      const expected = crypto
+        .createHmac('sha256', config.webhookSecret)
+        .update(`${timestampHeader}.${rawBody}`)
+        .digest('hex');
+      const received = signatureHeader.trim().toLowerCase();
+      const expectedBuffer = Buffer.from(expected, 'utf8');
+      const receivedBuffer = Buffer.from(received, 'utf8');
       if (
-        expectedBufRaw.length === receivedBuf.length &&
-        crypto.timingSafeEqual(expectedBufRaw, receivedBuf)
+        expectedBuffer.length === receivedBuffer.length &&
+        crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
       ) {
         return { isValid: true };
       }
-
       return { isValid: false, reason: 'Webhook HMAC-SHA256 signature mismatch.' };
     } catch (err: any) {
       return { isValid: false, reason: `Signature verification exception: ${err.message}` };
