@@ -384,6 +384,29 @@ class AuthClient {
     throw new Error('Profile update did not return user');
   }
 
+  public async getTrades(): Promise<any[]> {
+    if (!this.getToken()) return [];
+    const res = await fetch('/api/user/trades', {
+      headers: this.getAuthHeaders(),
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load trade history');
+    return Array.isArray(data.trades) ? data.trades : [];
+  }
+
+  public async saveTrade(trade: Record<string, any>): Promise<void> {
+    if (!this.getToken()) return;
+    const res = await fetch('/api/user/trades', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(trade),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save trade');
+  }
+
   public isAdmin(): boolean {
     return this.currentUser?.role === 'admin';
   }
