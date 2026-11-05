@@ -240,12 +240,7 @@ class PaynectaService {
       }
     }
 
-    // Direct API key authorization with secret key
-    if (config.secretKey) {
-      return config.secretKey;
-    }
-
-    throw new Error('No valid Paynecta credentials found.');
+    throw new Error('Paynecta access-token exchange failed. Check the public and secret keys and retry.');
   }
 
   /**
@@ -547,22 +542,14 @@ class PaynectaService {
     const resolvedTapFlowId = tapFlowResolution.tapFlowId;
 
     // 8. Assemble Request Body according to Paynecta API documentation
+    // Paynecta accepts a TapFlow, amount in KES cents, merchant reference,
+    // and HTTPS return URLs. The payer enters their own M-Pesa number on Paynecta.
     const requestBody: Record<string, any> = {
       tapflow: resolvedTapFlowId,
-      tapflow_id: resolvedTapFlowId,
       amount: amountSubunits,
-      currency: 'KES',
-      merchant_reference: merchantReference,
-      description: params.description || `DevOptions Deposit ${merchantReference}`,
-      webhook_url: webhookUrl,
-      callback_url: webhookUrl,
+      reference: merchantReference,
       redirect_url: redirectUrl,
       cancel_url: cancelUrl,
-      customer: {
-        email,
-        phone: params.phone?.trim() || '+254700000000',
-        name: params.name?.trim() || email.split('@')[0],
-      },
     };
 
     if (params.metadata && Object.keys(params.metadata).length > 0) {
@@ -570,10 +557,7 @@ class PaynectaService {
     }
 
     // 9. Call Paynecta Checkout API (POST /v1/checkout_sessions or /checkout/sessions)
-    const sessionEndpoints = [
-      `${config.baseUrl}/checkout_sessions`,
-      `${config.baseUrl}/checkout/sessions`,
-    ];
+    const sessionEndpoints = [`${config.baseUrl}/checkout_sessions`];
 
     let lastError: any = null;
     let responseData: any = null;
@@ -789,7 +773,7 @@ class PaynectaService {
     baseUrl: string
   ): Promise<PaynectaVerificationResult> {
     try {
-      const txUrl = `${baseUrl}/transactions?merchant_reference=${encodeURIComponent(merchantReference)}`;
+      const txUrl = `${baseUrl}/transactions/${encodeURIComponent(merchantReference)}`;
       const res = await fetch(txUrl, {
         method: 'GET',
         headers: {
