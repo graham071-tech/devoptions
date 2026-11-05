@@ -286,7 +286,7 @@ function TradingAppContent() {
       `${mode.toUpperCase()} Account Active`,
       mode === 'demo'
         ? 'Risk-free practice environment.'
-        : 'Simulated contracts use your deposited balance. No broker orders are placed.'
+        : 'Real-balance simulation is paused until market results can be verified by the server. No broker orders are placed.'
     );
   };
 
