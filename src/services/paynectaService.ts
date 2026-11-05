@@ -521,6 +521,9 @@ class PaynectaService {
       (typeof process !== 'undefined' && (process.env.APP_BASE_URL || process.env.APP_URL)) ||
       'http://localhost:3000';
     const cleanAppUrl = rawAppUrl.replace(/\/+$/, '');
+    if (!cleanAppUrl.startsWith('https://')) {
+      throw new Error('Paynecta requires APP_URL to be an HTTPS address. Set APP_URL to your deployed Vercel domain.');
+    }
     const webhookUrl = `${cleanAppUrl}/api/paynecta/webhook`;
 
     // 4. Unique Merchant Reference
@@ -552,11 +555,7 @@ class PaynectaService {
       cancel_url: cancelUrl,
     };
 
-    if (params.metadata && Object.keys(params.metadata).length > 0) {
-      requestBody.metadata = params.metadata;
-    }
-
-    // 9. Call Paynecta Checkout API (POST /v1/checkout_sessions or /checkout/sessions)
+    // 9. Call Paynecta's documented checkout-session endpoint.
     const sessionEndpoints = [`${config.baseUrl}/checkout_sessions`];
 
     let lastError: any = null;
@@ -573,10 +572,6 @@ class PaynectaService {
           },
           body: JSON.stringify(requestBody),
         });
-
-        if (res.status === 404 && endpoint === sessionEndpoints[0]) {
-          continue;
-        }
 
         if (!res.ok) {
           const errorText = await res.text();
@@ -718,10 +713,9 @@ class PaynectaService {
     try {
       const token = await this.getAccessToken();
 
-      // Look up via checkout_sessions / checkout/sessions
+      // Paynecta's documented checkout-session verification endpoint.
       const lookupUrls = [
         `${config.baseUrl}/checkout_sessions/${encodeURIComponent(sessionId)}`,
-        `${config.baseUrl}/checkout/sessions/${encodeURIComponent(sessionId)}`,
       ];
 
       let data: any = null;
@@ -740,8 +734,6 @@ class PaynectaService {
         if (res.ok) {
           data = await res.json();
           break;
-        } else if (res.status === 404 && url === lookupUrls[0]) {
-          continue;
         }
       }
 
