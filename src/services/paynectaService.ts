@@ -738,14 +738,9 @@ class PaynectaService {
       }
 
       if (!data) {
-        if (lastStatus === 404) {
-          // Fallback lookup via transactions endpoint if available
-          return await this.verifyViaTransactionLookup(merchantReference, token, config.baseUrl);
-        }
-
         return {
           status: 'verification_delayed',
-          failureReason: `Paynecta service verification temporarily unreachable (${lastStatus}).`,
+          failureReason: `Paynecta checkout-session verification is temporarily unavailable (${lastStatus}).`,
         };
       }
 
@@ -755,48 +750,6 @@ class PaynectaService {
       return {
         status: 'verification_delayed',
         failureReason: `Network error verifying transaction with Paynecta: ${err.message}`,
-      };
-    }
-  }
-
-  private async verifyViaTransactionLookup(
-    merchantReference: string,
-    token: string,
-    baseUrl: string
-  ): Promise<PaynectaVerificationResult> {
-    try {
-      const txUrl = `${baseUrl}/transactions/${encodeURIComponent(merchantReference)}`;
-      const res = await fetch(txUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-        },
-      });
-
-      if (!res.ok) {
-        return {
-          status: 'pending',
-          failureReason: 'Payment is awaiting settlement confirmation.',
-        };
-      }
-
-      const data = await res.json();
-      const transaction = Array.isArray(data)
-        ? data[0]
-        : data.data && Array.isArray(data.data)
-        ? data.data[0]
-        : data;
-
-      if (!transaction) {
-        return { status: 'pending' };
-      }
-
-      return this.mapPaynectaStatus(transaction);
-    } catch (err: any) {
-      return {
-        status: 'verification_delayed',
-        failureReason: err.message,
       };
     }
   }
