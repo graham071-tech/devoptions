@@ -1529,29 +1529,80 @@ app.post(
 );
 
 // 5. CANCEL PENDING DEPOSIT
-app.post('/api/paynecta/cancel-deposit/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const depositId = req.params.id;
-  const user = req.user!;
+// 5. CANCEL PENDING DEPOSIT (SUPABASE)
+app.post(
+  '/api/paynecta/cancel-deposit/:id',
+  requireAuth,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const depositId = req.params.id;
+      const user = req.user!;
+      const supabase = getSupabaseClient();
 
-  if (!db.deposits) db.deposits = [];
-  const deposit = db.deposits.find((d) => d.id === depositId);
+      const { data: deposit, error: fetchError } = await supabase
+        .from('deposits')
+        .select('*')
+        .eq('id', depositId)
+        .maybeSingle();
 
-  if (!deposit) {
-    return res.status(404).json({ error: 'Deposit record not found.' });
+      if (fetchError) {
+        console.error('[Supabase Cancel Deposit Fetch Error]:', fetchError);
+        return res.status(500).json({ error: 'Could not load deposit.' });
+      }
+
+      if (!deposit) {
+        return res.status(404).json({ error: 'Deposit record not found.' });
+      }
+
+      if (deposit.user_id !== user.id && user.role !== 'admin') {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+
+      if (deposit.status === 'succeeded') {
+        return res.status(409).json({
+          error: 'A successful payment cannot be cancelled.',
+          deposit,
+        });
+      }
+
+      if (deposit.status === 'pending') {
+        const { data: updatedDeposit, error: updateError } = await supabase
+          .from('deposits')
+          .update({
+            status: 'cancelled',
+            failure_reason: 'Cancelled by user.',
+            updated_at: Date.now(),
+          })
+          .eq('id', depositId)
+          .eq('status', 'pending')
+          .select()
+          .maybeSingle();
+
+        if (updateError) {
+          console.error('[Supabase Cancel Deposit Update Error]:', updateError);
+          return res.status(500).json({ error: 'Could not cancel deposit.' });
+        }
+
+        return res.json({
+          message: updatedDeposit
+            ? 'Deposit marked as cancelled.'
+            : 'Deposit status has already changed.',
+          deposit: updatedDeposit || deposit,
+        });
+      }
+
+      return res.json({
+        message: 'Deposit is not pending and was not changed.',
+        deposit,
+      });
+    } catch (err: any) {
+      console.error('[Cancel Deposit Error]:', err);
+      return res.status(500).json({
+        error: 'Could not cancel deposit.',
+      });
+    }
   }
-
-  if (deposit.userId !== user.id && user.role !== 'admin') {
-    return res.status(403).json({ error: 'Access denied.' });
-  }
-
-  if (deposit.status === 'pending') {
-    deposit.status = 'cancelled';
-    deposit.failureReason = 'Cancelled by user.';
-    deposit.updatedAt = Date.now();
-    saveDatabase(db);
-  }
-
-  return res.json({ message: 'Deposit marked as cancelled.', deposit });
+);
 });
 
 // 6. PAYNECTA WEBHOOK RECEIVER (HMAC-SHA256 SIGNED WITH REPLAY PROTECTION)
