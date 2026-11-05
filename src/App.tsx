@@ -86,9 +86,13 @@ function TradingAppContent() {
           realBalance: u.realBalance ?? prev.realBalance,
         }));
         authClient.getTrades().then((serverTrades) => {
-          if (serverTrades.length) {
-            storage.replaceTradeHistory(serverTrades as Trade[]);
-            setCompletedTrades(serverTrades as Trade[]);
+          const trades = serverTrades as Trade[];
+          const openTrades = trades.filter((trade) => trade.status === 'active');
+          const settledTrades = trades.filter((trade) => trade.status !== 'active');
+          setActiveTrades(openTrades);
+          if (settledTrades.length) {
+            storage.replaceTradeHistory(settledTrades);
+            setCompletedTrades(settledTrades);
           }
         }).catch((error) => console.warn('Could not sync server trade history:', error));
       }
