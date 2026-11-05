@@ -549,99 +549,165 @@ function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?
 app.post(
   '/api/auth/register',
   rateLimitMiddleware(10, 60000),
-  (req: Request, res: Response) => {
-    const { email, phone, password, confirmPassword } = req.body;
+  async (req: Request, res: Response) => {
+    try {
+      const { email, phone, password, confirmPassword } = req.body;
 
-    if (!email || !phone || !password) {
-      return res.status(400).json({ error: 'Email, phone number, and password are required.' });
-    }
+      if (!email || !phone || !password) {
+        return res.status(400).json({ error: 'Email, phone number, and password are required.' });
+      }
 
-    const normEmail = normalizeEmail(email);
-    const normPhone = normalizePhone(phone);
+      const normEmail = normalizeEmail(email);
+      const normPhone = normalizePhone(phone);
 
-    if (!validateEmail(normEmail)) {
-      return res.status(400).json({ error: 'Please enter a valid email address.' });
-    }
+      if (!validateEmail(normEmail)) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
 
-    if (!validatePhone(normPhone)) {
-      return res.status(400).json({
-        error: 'Please enter a valid phone number in international format (e.g. +14155552671 or +254712345678).',
+      if (!validatePhone(normPhone)) {
+        return res.status(400).json({
+          error: 'Please enter a valid phone number in international format.',
+        });
+      }
+
+      const passCheck = validatePasswordSecurity(password);
+      if (!passCheck.isValid) {
+        return res.status(400).json({ error: passCheck.message });
+      }
+
+      if (!confirmPassword) {
+        return res.status(400).json({ error: 'Please confirm your password.' });
+      }
+
+      if (password !== confirmPassword) {
+        return res.status(400).json({ error: 'Passwords do not match.' });
+      }
+
+      const supabase = getSupabaseClient();
+
+      const { data: existingEmail } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', normEmail)
+        .maybeSingle();
+
+      if (existingEmail) {
+        return res.status(409).json({
+          error: 'An account with this email address already exists.',
+        });
+      }
+
+      const { data: existingPhone } = await supabase
+        .from('users')
+        .select('id')
+        .eq('phone', normPhone)
+        .maybeSingle();
+
+      if (existingPhone) {
+        return res.status(409).json({
+          error: 'An account with this phone number already exists.',
+        });
+      }
+
+      const salt = crypto.randomBytes(16).toString('hex');
+      const passwordHash = hashPassword(password, salt);
+      const emailOtp = generateSecureOtp();
+      const phoneOtp = generateSecureOtp();
+      const now = Date.now();
+      const otpExpiry = now + 15 * 60 * 1000;
+
+      const newUser: UserRecord = {
+        id: `usr_${crypto.randomUUID()}`,
+        email: normEmail,
+        phone: normPhone,
+        passwordHash,
+        salt,
+        createdAt: now,
+        emailVerified: false,
+        phoneVerified: false,
+        emailVerificationCode: emailOtp,
+        emailVerificationExpires: otpExpiry,
+        phoneVerificationCode: phoneOtp,
+        phoneVerificationExpires: otpExpiry,
+        demoBalance: 10000,
+        realBalance: 0,
+        fullName: '',
+        country: 'International',
+      };
+
+      const { error: userError } = await supabase.from('users').insert({
+        id: newUser.id,
+        email: newUser.email,
+        phone: newUser.phone,
+        password_hash: newUser.passwordHash,
+        salt: newUser.salt,
+        role: 'user',
+        created_at: newUser.createdAt,
+        email_verified: false,
+        phone_verified: false,
+        email_verification_code: emailOtp,
+        email_verification_expires: otpExpiry,
+        phone_verification_code: phoneOtp,
+        phone_verification_expires: otpExpiry,
+        demo_balance: newUser.demoBalance,
+        real_balance: newUser.realBalance,
+        full_name: newUser.fullName,
+        country: newUser.country,
       });
+
+      if (userError) {
+        console.error('[Supabase Registration Error]:', userError);
+
+        if (userError.code === '23505') {
+          return res.status(409).json({
+            error: 'An account with this email address or phone number already exists.',
+          });
+        }
+
+        return res.status(500).json({ error: 'Could not create your account.' });
+      }
+
+      const sessionToken = generateToken();
+
+      const { error: sessionError } = await supabase.from('sessions').insert({
+        token: sessionToken,
+        user_id: newUser.id,
+        created_at: now,
+        expires_at: now + 7 * 24 * 60 * 60 * 1000,
+      });
+
+      if (sessionError) {
+        console.error('[Supabase Registration Session Error]:', sessionError);
+        await supabase.from('users').delete().eq('id', newUser.id);
+
+        return res.status(500).json({
+          error: 'Your account was created, but we could not start your session. Please try logging in.',
+        });
+      }
+
+      setSessionCookie(res, sessionToken);
+
+      const isDevelopment = process.env.NODE_ENV !== 'production';
+
+      if (isDevelopment) {
+        console.log(`[DevOptions Auth] New User Registered: ${normEmail}`);
+      }
+
+      return res.status(201).json({
+        message: 'Account registered successfully. Please verify your contact details.',
+        token: sessionToken,
+        user: safeUserResponse(
+          newUser,
+          isDevelopment ? emailOtp : undefined,
+          isDevelopment ? phoneOtp : undefined
+        ),
+      });
+    } catch (err) {
+      console.error('[Supabase Registration Error]:', err);
+      return res.status(500).json({ error: 'Registration service is unavailable.' });
     }
-
-    const passCheck = validatePasswordSecurity(password);
-    if (!passCheck.isValid) {
-      return res.status(400).json({ error: passCheck.message });
-    }
-
-    if (!confirmPassword) {
-      return res.status(400).json({ error: 'Please confirm your password.' });
-    }
-
-    if (password !== confirmPassword) {
-      return res.status(400).json({ error: 'Passwords do not match.' });
-    }
-
-    // Check duplicate account
-    const existingEmail = db.users.find((u) => u.email === normEmail);
-    if (existingEmail) {
-      return res.status(409).json({ error: 'An account with this email address already exists.' });
-    }
-
-    const existingPhone = db.users.find((u) => u.phone === normPhone);
-    if (existingPhone) {
-      return res.status(409).json({ error: 'An account with this phone number already exists.' });
-    }
-
-    // Create user
-    const salt = crypto.randomBytes(16).toString('hex');
-    const passwordHash = hashPassword(password, salt);
-    const emailOtp = generateSecureOtp();
-    const phoneOtp = generateSecureOtp();
-    const now = Date.now();
-    const otpExpiry = now + 15 * 60 * 1000; // 15 mins
-
-    const newUser: UserRecord = {
-      id: `usr_${crypto.randomUUID()}`,
-      email: normEmail,
-      phone: normPhone,
-      passwordHash,
-      salt,
-      createdAt: now,
-      emailVerified: false,
-      phoneVerified: false,
-      emailVerificationCode: emailOtp,
-      emailVerificationExpires: otpExpiry,
-      phoneVerificationCode: phoneOtp,
-      phoneVerificationExpires: otpExpiry,
-      demoBalance: 10000.0,
-      realBalance: 0.0,
-      fullName: '',
-      country: 'International',
-    };
-
-    // Create initial session
-    const sessionToken = generateToken();
-    const session: SessionRecord = {
-      token: sessionToken,
-      userId: newUser.id,
-      createdAt: now,
-      expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
-    };
-
-    db.users.push(newUser);
-    db.sessions.push(session);
-    saveDatabase(db);
-    setSessionCookie(res, sessionToken);
-
-    console.log(`[DevOptions Auth] New User Registered: ${normEmail} | Email OTP: ${emailOtp} | Phone OTP: ${phoneOtp}`);
-
-    return res.status(201).json({
-      message: 'Account registered successfully. Please verify your contact details.',
-      token: sessionToken,
-      user: safeUserResponse(newUser, emailOtp, phoneOtp),
-    });
   }
+);
 );
 
 // 2. LOGIN
@@ -848,6 +914,9 @@ app.post(
 
     if (!identifier || !code || !newPassword) {
       return res.status(400).json({ error: 'All fields are required.' });
+
+
+      
     }
 
     const passCheck = validatePasswordSecurity(newPassword);
