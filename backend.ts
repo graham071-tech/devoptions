@@ -657,6 +657,21 @@ function userFromRow(row: any): UserRecord {
     theme: row.theme || undefined, soundEnabled: row.sound_enabled ?? undefined,
   };
 }
+function adminUserResponse(row: any) {
+  return {
+    id: row.id,
+    email: row.email,
+    phone: row.phone,
+    role: row.role || 'user',
+    emailVerified: Boolean(row.email_verified),
+    phoneVerified: Boolean(row.phone_verified),
+    demoBalance: Number(row.demo_balance ?? 10000),
+    realBalance: Number(row.real_balance ?? 0),
+    fullName: row.full_name || '',
+    country: row.country || 'International',
+    createdAt: Number(row.created_at),
+  };
+}
 function userToRow(user: UserRecord) {
   return {
     id: user.id, email: user.email, phone: user.phone,
@@ -907,9 +922,11 @@ app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, 
 });
 app.get('/api/admin/users', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const { data, error } = await getSupabaseClient().from('users').select('*').order('created_at', { ascending: false });
+    const { data, error } = await getSupabaseClient().from('users')
+      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+      .order('created_at', { ascending: false });
     if (error) throw error;
-    return res.json({ users: (data || []).map((row: any) => safeUserResponse(userFromRow(row))) });
+    return res.json({ users: (data || []).map(adminUserResponse) });
   } catch (error) {
     console.error('[Supabase Admin Users Error]:', error);
     return res.status(500).json({ error: 'Could not load users.' });
@@ -920,7 +937,9 @@ app.post('/api/admin/users/:id/role', requireAdmin, async (req: AuthenticatedReq
     const role = req.body?.role;
     if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: 'Role must be either "admin" or "user".' });
     const supabase = getSupabaseClient();
-    const { data: target, error: findError } = await supabase.from('users').select('*').eq('id', req.params.id).maybeSingle();
+    const { data: target, error: findError } = await supabase.from('users')
+      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+      .eq('id', req.params.id).maybeSingle();
     if (findError) throw findError;
     if (!target) return res.status(404).json({ error: 'Target user not found.' });
     if (target.role === 'admin' && role === 'user') {
@@ -930,7 +949,7 @@ app.post('/api/admin/users/:id/role', requireAdmin, async (req: AuthenticatedReq
     }
     const { data, error } = await supabase.from('users').update({ role }).eq('id', req.params.id).select('*').single();
     if (error) throw error;
-    return res.json({ message: `User ${target.email} role updated to ${role}.`, user: safeUserResponse(userFromRow(data)) });
+    return res.json({ message: `User ${target.email} role updated to ${role}.`, user: adminUserResponse(data) });
   } catch (error) {
     console.error('[Supabase Role Update Error]:', error);
     return res.status(500).json({ error: 'Could not update user role.' });
@@ -943,7 +962,9 @@ app.post('/api/admin/users/:id/balance', requireAdmin, async (req: Authenticated
     if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: 'Please specify a valid positive numerical amount.' });
     if (accountType !== 'real' && accountType !== 'demo') return res.status(400).json({ error: 'Account type must be real or demo.' });
     const supabase = getSupabaseClient();
-    const { data: target, error: findError } = await supabase.from('users').select('*').eq('id', req.params.id).maybeSingle();
+    const { data: target, error: findError } = await supabase.from('users')
+      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+      .eq('id', req.params.id).maybeSingle();
     if (findError) throw findError;
     if (!target) return res.status(404).json({ error: 'Target user not found.' });
     const column = accountType === 'real' ? 'real_balance' : 'demo_balance';
@@ -951,7 +972,7 @@ app.post('/api/admin/users/:id/balance', requireAdmin, async (req: Authenticated
     const updatedValue = operation === 'set' ? value : Math.max(0, current + value);
     const { data, error } = await supabase.from('users').update({ [column]: updatedValue }).eq('id', req.params.id).select('*').single();
     if (error) throw error;
-    return res.json({ message: `Account balance updated for ${target.email}.`, user: safeUserResponse(userFromRow(data)) });
+    return res.json({ message: `Account balance updated for ${target.email}.`, user: adminUserResponse(data) });
   } catch (error) {
     console.error('[Supabase Balance Update Error]:', error);
     return res.status(500).json({ error: 'Could not update user balance.' });
