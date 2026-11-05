@@ -1,5 +1,4 @@
 import express, { Request, Response, NextFunction } from 'express';
-import path from 'path';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { paynectaService } from './src/services/paynectaService';
@@ -1421,7 +1420,6 @@ app.post(
     }
   }
 );
-);
 
 // 5. CANCEL PENDING DEPOSIT
 // 5. CANCEL PENDING DEPOSIT (SUPABASE)
@@ -1498,7 +1496,6 @@ app.post(
     }
   }
 );
-});
 
 // 6. PAYNECTA WEBHOOK RECEIVER (HMAC-SHA256 SIGNED WITH REPLAY PROTECTION)
 // 6. PAYNECTA WEBHOOK RECEIVER (SUPABASE + ATOMIC CREDITING)
