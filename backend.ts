@@ -897,7 +897,7 @@ app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, 
       verifiedUsers: (usersResult.data || []).filter((u: any) => u.email_verified && u.phone_verified).length,
       activeSessions: sessionsResult.count || 0, totalTrades: trades.length,
       totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
-      netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profit) || 0), 0).toFixed(2)),
+      netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profitLoss ?? t.profit) || 0), 0).toFixed(2)),
       adminsCount: (usersResult.data || []).filter((u: any) => u.role === 'admin').length,
     }, defaultAccounts: []});
   } catch (error) {
