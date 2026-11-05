@@ -23,6 +23,7 @@ begin
      or coalesce(trim(p_provider_reference), '') = ''
      or p_confirmed_amount_kes is null
      or p_confirmed_amount_kes <= 0
+     or p_source is null
      or p_source not in ('verification', 'webhook') then
     return jsonb_build_object('success', false, 'error', 'Invalid deposit confirmation details.');
   end if;
