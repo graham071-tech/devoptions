@@ -230,13 +230,13 @@ class PaynectaService {
           } else if (res.status === 403) {
             throw new Error(`Paynecta account authorization error (403): ${msg}. Please ensure your account has active API permissions.`);
           }
-          console.warn(`[Paynecta Service] /auth/token returned ${res.status}: ${msg}. Falling back to secret key.`);
+          console.warn(`[Paynecta Service] /auth/token returned ${res.status}: ${msg}. No direct-key fallback is permitted by Paynecta.`);
         }
       } catch (err: any) {
         if (err.message.includes('Paynecta authentication failed') || err.message.includes('Paynecta account authorization error')) {
           throw err;
         }
-        console.warn(`[Paynecta Service] /auth/token exchange error: ${err.message}. Falling back to secret key.`);
+        console.warn(`[Paynecta Service] /auth/token exchange error: ${err.message}.`);
       }
     }
 
