@@ -17,6 +17,10 @@ declare
   v_trade_id text;
   v_now bigint := floor(extract(epoch from clock_timestamp()) * 1000);
 begin
+  if p_mode = 'real' then
+    raise exception 'Real-balance simulation requires server-verified market outcomes';
+  end if;
+
   if p_mode not in ('demo', 'real')
      or p_stake is null or p_stake <= 0
      or p_stake <> round(p_stake, 2)
@@ -103,6 +107,10 @@ begin
   v_mode := v_trade.trade_data->>'mode';
   v_status := p_settlement->>'status';
   v_payout := coalesce((v_trade.trade_data->>'potentialPayout')::numeric, 0);
+
+  if v_mode = 'real' then
+    raise exception 'Real-balance simulation requires server-verified market outcomes';
+  end if;
 
   if v_mode not in ('demo', 'real') or v_payout <= 0 then
     raise exception 'Stored trade data is invalid';
