@@ -226,7 +226,9 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     try {
       if (authClient.isAuthenticated()) {
         const balances = await authClient.placeTrade(trade, trade.mode);
-        onUpdateProfile({ ...profile, ...balances });
+        const updatedProfile = { ...profile, ...balances };
+        onUpdateProfile(updatedProfile);
+        storage.saveUserProfile(updatedProfile);
       } else {
         if (trade.mode === 'real') {
           throw new Error('Please sign in before using your deposited balance.');
@@ -234,7 +236,9 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
         if (profile.demoBalance < trade.stake) {
           throw new Error('Insufficient demo balance.');
         }
-        onUpdateProfile({ ...profile, demoBalance: Number((profile.demoBalance - trade.stake).toFixed(2)) });
+        const updatedProfile = { ...profile, demoBalance: Number((profile.demoBalance - trade.stake).toFixed(2)) };
+        onUpdateProfile(updatedProfile);
+        storage.saveUserProfile(updatedProfile);
       }
       setActiveTrades((prev) => [trade, ...prev]);
       audioEffects.playTradePlaced();
