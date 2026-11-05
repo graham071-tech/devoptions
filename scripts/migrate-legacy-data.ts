@@ -63,17 +63,29 @@ async function main() {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SECRET_KEY. Use server-side secrets only.');
   }
 
-  let legacyText: string;
+  let legacyText: string | undefined;
   const legacyPath = path.resolve(process.cwd(), 'data/db.json');
   if (fs.existsSync(legacyPath)) {
     legacyText = fs.readFileSync(legacyPath, 'utf8');
   } else {
-    // Recover the original committed file from the base branch's Git history.
-    try {
-      legacyText = execFileSync('git', ['show', 'origin/main:data/db.json'], { encoding: 'utf8' });
-    } catch {
-      legacyText = execFileSync('git', ['show', 'main:data/db.json'], { encoding: 'utf8' });
+    // Try the current main branch first. After the PR is merged, the file is
+    // removed from main, so fall back to the exact base commit that contained it.
+    const historicalRefs = [
+      'origin/main:data/db.json',
+      'main:data/db.json',
+      'd10c0abd8a899380bb06b2d92574e6579859aeaf:data/db.json',
+    ];
+    for (const historicalRef of historicalRefs) {
+      try {
+        legacyText = execFileSync('git', ['show', historicalRef], { encoding: 'utf8' });
+        break;
+      } catch {
+        // Try the next known historical source.
+      }
     }
+  }
+  if (!legacyText) {
+    throw new Error('Could not locate the original data/db.json in the checked-out files or Git history.');
   }
 
   const legacy = JSON.parse(legacyText) as {
