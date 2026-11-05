@@ -1277,15 +1277,48 @@ app.post(
 );
 
 // 3. GET USER'S DEPOSIT HISTORY
-app.get('/api/paynecta/deposits', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const user = req.user!;
-  if (!db.deposits) db.deposits = [];
-  const userDeposits = db.deposits
-    .filter((d) => d.userId === user.id)
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, 50);
+app.get('/api/paynecta/deposits', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const supabase = getSupabaseClient();
 
-  return res.json({ deposits: userDeposits });
+    const { data, error } = await supabase
+      .from('deposits')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error('[Supabase Deposit History Error]:', error);
+      return res.status(500).json({ error: 'Could not load deposit history.' });
+    }
+
+    const deposits = (data || []).map((d) => ({
+      id: d.id,
+      userId: d.user_id,
+      merchantReference: d.merchant_reference,
+      amountKes: Number(d.amount_kes),
+      amountSubunits: Number(d.amount_subunits),
+      amountUsd: Number(d.amount_usd),
+      currency: d.currency,
+      sessionId: d.session_id,
+      checkoutUrl: d.checkout_url,
+      providerReference: d.provider_reference,
+      receiptNumber: d.receipt_number,
+      status: d.status,
+      failureReason: d.failure_reason,
+      confirmedAmountKes: d.confirmed_amount_kes == null ? undefined : Number(d.confirmed_amount_kes),
+      createdAt: Number(d.created_at),
+      updatedAt: Number(d.updated_at),
+      confirmedAt: d.confirmed_at == null ? undefined : Number(d.confirmed_at),
+    }));
+
+    return res.json({ deposits });
+  } catch (err: any) {
+    console.error('[Supabase Deposit History Error]:', err);
+    return res.status(500).json({ error: 'Could not load deposit history.' });
+  }
 });
 
 // 4. VERIFY DEPOSIT STATUS (IDEMPOTENT INDEPENDENT RECONCILIATION)
