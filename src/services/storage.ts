@@ -190,6 +190,14 @@ class StorageService {
     return trimmed;
   }
 
+  public replaceTradeHistory(trades: Trade[]): void {
+    try {
+      localStorage.setItem(TRADES_KEY, JSON.stringify(trades.slice(0, 500)));
+    } catch (e) {
+      console.error('Failed to replace trade history', e);
+    }
+  }
+
   public clearTradeHistory(): void {
     try {
       localStorage.removeItem(TRADES_KEY);
