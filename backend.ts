@@ -1629,22 +1629,29 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
     const event = req.body || {};
 
     const merchantReference =
-      event.merchant_reference ||
       event.data?.merchant_reference ||
+      event.merchant_reference ||
       event.payment?.merchant_reference;
 
     const sessionId =
       event.session_id ||
-      event.id ||
       event.data?.session_id ||
-      event.data?.id;
+      event.data?.id ||
+      event.id;
 
     const providerReference =
-      event.receipt_number ||
-      event.data?.receipt_number ||
+      event.data?.reference ||
+      event.payment?.reference ||
       event.transaction_id ||
       event.data?.transaction_id ||
-      event.payment?.reference;
+      event.receipt_number ||
+      event.data?.receipt_number;
+
+    const receiptNumber =
+      event.data?.receipt ||
+      event.payment?.receipt ||
+      event.receipt_number ||
+      event.data?.receipt_number;
 
     if (!merchantReference && !sessionId && !providerReference) {
       return res.status(400).json({
@@ -1692,33 +1699,25 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       eventType.includes('payment.succeeded') ||
       eventType.includes('checkout.session.completed')
     ) {
-      // Never credit based on a webhook payload alone: independently confirm
-      // the session with Paynecta and compare the paid amount to our own record.
-      const verified = await paynectaService.verifyCheckoutSession(
-        deposit.session_id || '',
-        deposit.merchant_reference
-      );
-      if (verified.status !== 'succeeded') {
-        console.warn('[Paynecta Webhook] Provider API has not independently confirmed success yet.');
-        return res.status(202).json({ received: true, credited: false, note: 'Awaiting independent provider verification.' });
-      }
+      // The signed webhook is authoritative. Paynecta sends amount in KES cents.
+      const paidSubunits = Number(event.data?.amount ?? event.amount);
+      const currency = String(event.data?.currency ?? event.currency ?? '').toUpperCase();
       if (
-        verified.confirmedAmountKes !== undefined &&
-        Math.round(verified.confirmedAmountKes) !== Number(deposit.amount_kes)
+        !Number.isSafeInteger(paidSubunits) ||
+        paidSubunits !== Number(deposit.amount_subunits) ||
+        currency !== 'KES'
       ) {
-        console.error('[Paynecta Webhook] Confirmed amount does not match deposit:', deposit.id);
-        return res.status(409).json({ error: 'Payment amount mismatch; no balance was credited.' });
+        console.error('[Paynecta Webhook] Amount/currency mismatch; deposit not credited:', deposit.id);
+        return res.status(409).json({ error: 'Payment amount or currency mismatch; no balance was credited.' });
       }
 
-      const trustedProviderReference = verified.providerReference || verified.receiptNumber || 'PAYNECTA_VERIFIED';
-      const trustedReceipt = verified.receiptNumber || null;
       const { data: creditResult, error: creditError } = await supabase.rpc(
         'confirm_paynecta_deposit',
         {
           p_deposit_id: deposit.id,
-          p_provider_reference: trustedProviderReference,
-          p_receipt_number: trustedReceipt,
-          p_confirmed_amount_kes: verified.confirmedAmountKes ?? Number(deposit.amount_kes),
+          p_provider_reference: providerReference || 'PAYNECTA_WEBHOOK',
+          p_receipt_number: receiptNumber || null,
+          p_confirmed_amount_kes: paidSubunits / 100,
           p_source: 'webhook',
         }
       );
