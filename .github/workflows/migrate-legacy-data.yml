@@ -19,7 +19,6 @@ jobs:
       - name: Check out migration branch and full history
         uses: actions/checkout@v4
         with:
-          ref: fix/supabase-vercel-backend
           fetch-depth: 0
 
       - name: Fetch original main branch data
