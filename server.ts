@@ -624,471 +624,376 @@ app.post(
   }
 );
 
-// 2. LOGIN
-app.post(
-  '/api/auth/login',
-  rateLimitMiddleware(15, 60000),
-  (req: Request, res: Response) => {
-    const { identifier, password } = req.body;
+// Shared Supabase row mapper for all authenticated routes.
+function userFromRow(row: any): UserRecord {
+  return {
+    id: row.id, email: row.email, phone: row.phone,
+    passwordHash: row.password_hash, salt: row.salt, role: row.role,
+    createdAt: Number(row.created_at), emailVerified: Boolean(row.email_verified),
+    phoneVerified: Boolean(row.phone_verified),
+    emailVerificationCode: row.email_verification_code || undefined,
+    emailVerificationExpires: row.email_verification_expires == null ? undefined : Number(row.email_verification_expires),
+    phoneVerificationCode: row.phone_verification_code || undefined,
+    phoneVerificationExpires: row.phone_verification_expires == null ? undefined : Number(row.phone_verification_expires),
+    resetPasswordToken: row.reset_password_token || undefined,
+    resetPasswordExpires: row.reset_password_expires == null ? undefined : Number(row.reset_password_expires),
+    demoBalance: Number(row.demo_balance ?? 10000), realBalance: Number(row.real_balance ?? 0),
+    fullName: row.full_name || '', country: row.country || 'International',
+    theme: row.theme || undefined, soundEnabled: row.sound_enabled ?? undefined,
+  };
+}
+function userToRow(user: UserRecord) {
+  return {
+    id: user.id, email: user.email, phone: user.phone,
+    password_hash: user.passwordHash, salt: user.salt, role: user.role || 'user',
+    created_at: user.createdAt, email_verified: user.emailVerified, phone_verified: user.phoneVerified,
+    email_verification_code: user.emailVerificationCode || null,
+    email_verification_expires: user.emailVerificationExpires ?? null,
+    phone_verification_code: user.phoneVerificationCode || null,
+    phone_verification_expires: user.phoneVerificationExpires ?? null,
+    reset_password_token: user.resetPasswordToken || null,
+    reset_password_expires: user.resetPasswordExpires ?? null,
+    demo_balance: user.demoBalance, real_balance: user.realBalance,
+    full_name: user.fullName || null, country: user.country || 'International',
+    theme: user.theme || null, sound_enabled: user.soundEnabled ?? null,
+  };
+}
+function publicAdminUser(user: UserRecord) {
+  const { passwordHash: _hash, salt: _salt, ...safe } = user;
+  return safeUserResponse(user);
+}
 
-    if (!identifier || !password) {
+// 2. LOGIN
+app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request, res: Response) => {
+  try {
+    const { identifier, password } = req.body || {};
+    if (typeof identifier !== 'string' || typeof password !== 'string' || !identifier.trim() || !password) {
       return res.status(400).json({ error: 'Email/Phone and password are required.' });
     }
-
-    const trimmed = identifier.trim();
-    const isEmail = trimmed.includes('@');
-    const normIdentifier = isEmail ? normalizeEmail(trimmed) : normalizePhone(trimmed);
-
-    const user = db.users.find((u) => (isEmail ? u.email === normIdentifier : u.phone === normIdentifier));
-    if (!user) {
+    const isEmail = identifier.trim().includes('@');
+    const normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
+    const supabase = getSupabaseClient();
+    const { data: row, error } = await supabase.from('users').select('*')
+      .eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+    if (error) throw error;
+    if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
       return res.status(401).json({ error: 'Invalid email, phone, or password.' });
     }
-
-    const valid = verifyPassword(password, user.salt, user.passwordHash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid email, phone, or password.' });
-    }
-
-    const sessionToken = generateToken();
-    const now = Date.now();
-    const session: SessionRecord = {
-      token: sessionToken,
-      userId: user.id,
-      createdAt: now,
-      expiresAt: now + 7 * 24 * 60 * 60 * 1000,
-    };
-
-    db.sessions.push(session);
-    saveDatabase(db);
-    setSessionCookie(res, sessionToken);
-
-    console.log(`[DevOptions Auth] User Logged In: ${user.email}`);
-
-    return res.json({
-      message: 'Logged in successfully.',
-      token: sessionToken,
-      user: safeUserResponse(user),
+    const now = Date.now(), token = generateToken();
+    const { error: sessionError } = await supabase.from('sessions').insert({
+      token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
     });
+    if (sessionError) throw sessionError;
+    setSessionCookie(res, token);
+    const user = userFromRow(row);
+    return res.json({ message: 'Logged in successfully.', token, user: safeUserResponse(user) });
+  } catch (error) {
+    console.error('[Supabase Login Error]:', error);
+    return res.status(500).json({ error: 'Login service is unavailable.' });
   }
-);
+});
 
 // 3. LOGOUT
-app.post('/api/auth/logout', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const token = req.sessionToken;
-  db.sessions = db.sessions.filter((s) => s.token !== token);
-  saveDatabase(db);
-  clearSessionCookie(res);
-  return res.json({ message: 'Logged out successfully.' });
+app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { error } = await getSupabaseClient().from('sessions').delete().eq('token', req.sessionToken);
+    if (error) throw error;
+    clearSessionCookie(res);
+    return res.json({ message: 'Logged out successfully.' });
+  } catch (error) {
+    console.error('[Supabase Logout Error]:', error);
+    return res.status(500).json({ error: 'Could not log out. Please try again.' });
+  }
 });
 
-// 4. GET CURRENT USER (SESSION VERIFICATION)
-app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  return res.json({
-    user: safeUserResponse(req.user!),
-  });
-});
+// 4. CURRENT USER
+app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) =>
+  res.json({ user: safeUserResponse(req.user!) })
+);
 
-// 5. VERIFY EMAIL
-app.post('/api/auth/verify-email', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const { code } = req.body;
-  const user = req.user!;
-
-  if (user.emailVerified) {
-    return res.json({ message: 'Email is already verified.', user: safeUserResponse(user) });
+// 5-6. VERIFY EMAIL / PHONE
+async function verifyContact(req: AuthenticatedRequest, res: Response, type: 'email' | 'phone') {
+  try {
+    const user = req.user!;
+    const isEmail = type === 'email';
+    const verified = isEmail ? user.emailVerified : user.phoneVerified;
+    const code = isEmail ? user.emailVerificationCode : user.phoneVerificationCode;
+    const expires = isEmail ? user.emailVerificationExpires : user.phoneVerificationExpires;
+    if (verified) return res.json({ message: `${type === 'email' ? 'Email' : 'Phone number'} is already verified.`, user: safeUserResponse(user) });
+    const supplied = String(req.body?.code || '').trim();
+    if (!supplied || !code) return res.status(400).json({ error: `Please enter the 6-digit ${type} verification code.` });
+    if (expires && expires < Date.now()) return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+    if (supplied !== code) return res.status(400).json({ error: `Invalid ${type} verification code. Please check and retry.` });
+    const patch = isEmail
+      ? { email_verified: true, email_verification_code: null, email_verification_expires: null }
+      : { phone_verified: true, phone_verification_code: null, phone_verification_expires: null };
+    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
+    if (error) throw error;
+    return res.json({ message: `${type === 'email' ? 'Email' : 'Phone number'} verified successfully!`, user: safeUserResponse(userFromRow(data)) });
+  } catch (error) {
+    console.error('[Supabase Verification Error]:', error);
+    return res.status(500).json({ error: 'Verification service is unavailable.' });
   }
-
-  if (!code || !user.emailVerificationCode) {
-    return res.status(400).json({ error: 'Please enter the 6-digit email verification code.' });
-  }
-
-  if (user.emailVerificationExpires && user.emailVerificationExpires < Date.now()) {
-    return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
-  }
-
-  if (user.emailVerificationCode !== code.trim()) {
-    return res.status(400).json({ error: 'Invalid email verification code. Please check and retry.' });
-  }
-
-  user.emailVerified = true;
-  user.emailVerificationCode = undefined;
-  user.emailVerificationExpires = undefined;
-  saveDatabase(db);
-
-  console.log(`[DevOptions Auth] Email Verified for user: ${user.email}`);
-  return res.json({ message: 'Email verified successfully!', user: safeUserResponse(user) });
-});
-
-// 6. VERIFY PHONE
-app.post('/api/auth/verify-phone', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const { code } = req.body;
-  const user = req.user!;
-
-  if (user.phoneVerified) {
-    return res.json({ message: 'Phone number is already verified.', user: safeUserResponse(user) });
-  }
-
-  if (!code || !user.phoneVerificationCode) {
-    return res.status(400).json({ error: 'Please enter the 6-digit phone verification code.' });
-  }
-
-  if (user.phoneVerificationExpires && user.phoneVerificationExpires < Date.now()) {
-    return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
-  }
-
-  if (user.phoneVerificationCode !== code.trim()) {
-    return res.status(400).json({ error: 'Invalid phone verification code. Please check and retry.' });
-  }
-
-  user.phoneVerified = true;
-  user.phoneVerificationCode = undefined;
-  user.phoneVerificationExpires = undefined;
-  saveDatabase(db);
-
-  console.log(`[DevOptions Auth] Phone Verified for user: ${user.phone}`);
-  return res.json({ message: 'Phone number verified successfully!', user: safeUserResponse(user) });
-});
+}
+app.post('/api/auth/verify-email', requireAuth, (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'email'));
+app.post('/api/auth/verify-phone', requireAuth, (req: AuthenticatedRequest, res: Response) => verifyContact(req, res, 'phone'));
 
 // 7. RESEND VERIFICATION CODE
-app.post('/api/auth/resend-code', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const { type } = req.body; // 'email' | 'phone'
-  const user = req.user!;
-  const newOtp = generateSecureOtp();
-  const now = Date.now();
-  const expiry = now + 15 * 60 * 1000;
-
-  if (type === 'phone') {
-    if (user.phoneVerified) {
-      return res.status(400).json({ error: 'Phone number is already verified.' });
+app.post('/api/auth/resend-code', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const type = req.body?.type === 'phone' ? 'phone' : 'email';
+    const user = req.user!;
+    if ((type === 'phone' && user.phoneVerified) || (type === 'email' && user.emailVerified)) {
+      return res.status(400).json({ error: `${type === 'phone' ? 'Phone number' : 'Email'} is already verified.` });
     }
-    user.phoneVerificationCode = newOtp;
-    user.phoneVerificationExpires = expiry;
-    saveDatabase(db);
-    console.log(`[DevOptions Auth] Resent Phone OTP for ${user.phone}: ${newOtp}`);
+    const otp = generateSecureOtp(), expiry = Date.now() + 15 * 60 * 1000;
+    const patch = type === 'phone'
+      ? { phone_verification_code: otp, phone_verification_expires: expiry }
+      : { email_verification_code: otp, email_verification_expires: expiry };
+    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
+    if (error) throw error;
+    const updated = userFromRow(data);
     return res.json({
-      message: 'New phone verification code generated.',
-      user: safeUserResponse(user, undefined, newOtp),
+      message: `New ${type} verification code generated.`,
+      user: safeUserResponse(updated, type === 'email' && process.env.NODE_ENV !== 'production' ? otp : undefined,
+        type === 'phone' && process.env.NODE_ENV !== 'production' ? otp : undefined),
     });
-  } else {
-    if (user.emailVerified) {
-      return res.status(400).json({ error: 'Email is already verified.' });
-    }
-    user.emailVerificationCode = newOtp;
-    user.emailVerificationExpires = expiry;
-    saveDatabase(db);
-    console.log(`[DevOptions Auth] Resent Email OTP for ${user.email}: ${newOtp}`);
-    return res.json({
-      message: 'New email verification code generated.',
-      user: safeUserResponse(user, newOtp, undefined),
-    });
+  } catch (error) {
+    console.error('[Supabase Resend Error]:', error);
+    return res.status(500).json({ error: 'Could not generate a new verification code.' });
   }
 });
 
-// 8. FORGOT PASSWORD (REQUEST RESET CODE)
-app.post(
-  '/api/auth/forgot-password',
-  rateLimitMiddleware(5, 60000),
-  (req: Request, res: Response) => {
-    const { identifier } = req.body;
-    if (!identifier) {
-      return res.status(400).json({ error: 'Please provide your registered email or phone number.' });
-    }
-
-    const trimmed = identifier.trim();
-    const isEmail = trimmed.includes('@');
-    const norm = isEmail ? normalizeEmail(trimmed) : normalizePhone(trimmed);
-
-    const user = db.users.find((u) => (isEmail ? u.email === norm : u.phone === norm));
-    if (!user) {
-      // Avoid account enumeration: always return generic message
-      return res.json({
-        message: 'If an account matches that contact method, a verification code has been dispatched.',
-      });
-    }
-
-    const resetOtp = generateSecureOtp();
-    user.resetPasswordToken = resetOtp;
-    user.resetPasswordExpires = Date.now() + 30 * 60 * 1000; // 30 minutes
-    saveDatabase(db);
-
-    console.log(`[DevOptions Auth] Password Reset Code for ${user.email}: ${resetOtp}`);
-
-    return res.json({
-      message: 'If an account matches that contact method, a verification code has been dispatched.',
-      devOtp: resetOtp, // For smooth dev testing
-    });
+// 8. FORGOT PASSWORD
+app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req: Request, res: Response) => {
+  try {
+    const identifier = req.body?.identifier;
+    if (typeof identifier !== 'string' || !identifier.trim()) return res.status(400).json({ error: 'Please provide your registered email or phone number.' });
+    const isEmail = identifier.trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
+    const supabase = getSupabaseClient();
+    const { data: row, error } = await supabase.from('users').select('id').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+    if (error) throw error;
+    const generic = 'If an account matches that contact method, a verification code has been dispatched.';
+    if (!row) return res.json({ message: generic });
+    const otp = generateSecureOtp(), expiry = Date.now() + 30 * 60 * 1000;
+    const { error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id);
+    if (updateError) throw updateError;
+    // OTP is returned only outside production until an email/SMS delivery provider is configured.
+    return res.json({ message: generic, ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}) });
+  } catch (error) {
+    console.error('[Supabase Forgot Password Error]:', error);
+    return res.status(500).json({ error: 'Password reset service is unavailable.' });
   }
-);
+});
 
-// 9. RESET PASSWORD (SUBMIT RESET)
-app.post(
-  '/api/auth/reset-password',
-  rateLimitMiddleware(10, 60000),
-  (req: Request, res: Response) => {
-    const { identifier, code, newPassword, confirmPassword } = req.body;
-
-    if (!identifier || !code || !newPassword) {
-      return res.status(400).json({ error: 'All fields are required.' });
-
-
-      
-    }
-
+// 9. RESET PASSWORD
+app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req: Request, res: Response) => {
+  try {
+    const { identifier, code, newPassword, confirmPassword } = req.body || {};
+    if (!identifier || !code || !newPassword) return res.status(400).json({ error: 'All fields are required.' });
     const passCheck = validatePasswordSecurity(newPassword);
-    if (!passCheck.isValid) {
-      return res.status(400).json({ error: passCheck.message });
-    }
-
-    if (confirmPassword && newPassword !== confirmPassword) {
-      return res.status(400).json({ error: 'Passwords do not match.' });
-    }
-
-    const trimmed = identifier.trim();
-    const isEmail = trimmed.includes('@');
-    const norm = isEmail ? normalizeEmail(trimmed) : normalizePhone(trimmed);
-
-    const user = db.users.find((u) => (isEmail ? u.email === norm : u.phone === norm));
-    if (
-      !user ||
-      !user.resetPasswordToken ||
-      user.resetPasswordToken !== code.trim() ||
-      (user.resetPasswordExpires && user.resetPasswordExpires < Date.now())
-    ) {
+    if (!passCheck.isValid) return res.status(400).json({ error: passCheck.message });
+    if (confirmPassword && newPassword !== confirmPassword) return res.status(400).json({ error: 'Passwords do not match.' });
+    const isEmail = String(identifier).trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
+    const supabase = getSupabaseClient();
+    const { data: row, error } = await supabase.from('users').select('*').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+    if (error) throw error;
+    if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
       return res.status(400).json({ error: 'Invalid or expired password reset code.' });
     }
-
-    // Hash new password
     const salt = crypto.randomBytes(16).toString('hex');
-    user.salt = salt;
-    user.passwordHash = hashPassword(newPassword, salt);
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpires = undefined;
-
-    // Invalidate existing sessions for security
-    db.sessions = db.sessions.filter((s) => s.userId !== user.id);
-    saveDatabase(db);
-
-    console.log(`[DevOptions Auth] Password successfully reset for ${user.email}`);
-
+    const passwordHash = hashPassword(newPassword, salt);
+    const { error: updateError } = await supabase.from('users').update({
+      salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
+    }).eq('id', row.id);
+    if (updateError) throw updateError;
+    const { error: sessionError } = await supabase.from('sessions').delete().eq('user_id', row.id);
+    if (sessionError) throw sessionError;
     return res.json({ message: 'Password has been reset successfully. Please log in with your new password.' });
+  } catch (error) {
+    console.error('[Supabase Reset Password Error]:', error);
+    return res.status(500).json({ error: 'Password reset service is unavailable.' });
   }
-);
+});
 
 // 10. UPDATE PROFILE
-app.put('/api/user/profile', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const { fullName, country, soundEnabled, theme } = req.body;
-  const user = req.user!;
-
-  if (fullName !== undefined) user.fullName = String(fullName).trim();
-  if (country !== undefined) user.country = String(country).trim();
-  if (soundEnabled !== undefined) user.soundEnabled = Boolean(soundEnabled);
-  if (theme !== undefined) user.theme = String(theme).trim();
-
-  saveDatabase(db);
-  return res.json({ message: 'Profile updated.', user: safeUserResponse(user) });
+app.put('/api/user/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const patch: Record<string, any> = {};
+    if (req.body.fullName !== undefined) patch.full_name = String(req.body.fullName).trim();
+    if (req.body.country !== undefined) patch.country = String(req.body.country).trim();
+    if (req.body.soundEnabled !== undefined) patch.sound_enabled = Boolean(req.body.soundEnabled);
+    if (req.body.theme !== undefined) patch.theme = String(req.body.theme).trim();
+    if (!Object.keys(patch).length) return res.json({ message: 'Profile unchanged.', user: safeUserResponse(req.user!) });
+    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', req.user!.id).select('*').single();
+    if (error) throw error;
+    return res.json({ message: 'Profile updated.', user: safeUserResponse(userFromRow(data)) });
+  } catch (error) {
+    console.error('[Supabase Profile Error]:', error);
+    return res.status(500).json({ error: 'Could not update profile.' });
+  }
 });
 
-// 11. USER TRADES PERSISTENCE
-app.get('/api/user/trades', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const userTrades = db.trades.filter((t) => t.userId === req.user!.id);
-  return res.json({ trades: userTrades.slice(0, 50) });
+// 11. USER TRADES
+app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { data, error } = await getSupabaseClient().from('trades').select('trade_data')
+      .eq('user_id', req.user!.id).order('recorded_at', { ascending: false }).limit(50);
+    if (error) throw error;
+    return res.json({ trades: (data || []).map((row: any) => row.trade_data) });
+  } catch (error) {
+    console.error('[Supabase Trades Read Error]:', error);
+    return res.status(500).json({ error: 'Could not load trade history.' });
+  }
 });
-
-app.post('/api/user/trades', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const trade = req.body;
-  if (!trade || !trade.id) {
-    return res.status(400).json({ error: 'Invalid trade payload' });
+app.post('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const trade = req.body;
+    if (!trade || typeof trade !== 'object' || !trade.id) return res.status(400).json({ error: 'Invalid trade payload' });
+    const saved = { ...trade, userId: req.user!.id, recordedAt: Date.now() };
+    const { error } = await getSupabaseClient().from('trades').upsert({
+      id: String(saved.id), user_id: req.user!.id, trade_data: saved, recorded_at: saved.recordedAt,
+    }, { onConflict: 'id' });
+    if (error) throw error;
+    return res.status(201).json({ message: 'Trade saved', trade: saved });
+  } catch (error) {
+    console.error('[Supabase Trade Save Error]:', error);
+    return res.status(500).json({ error: 'Could not save trade.' });
   }
-
-  trade.userId = req.user!.id;
-  trade.recordedAt = Date.now();
-  db.trades.unshift(trade);
-  if (db.trades.length > 500) {
-    db.trades = db.trades.slice(0, 500);
-  }
-  saveDatabase(db);
-  return res.status(201).json({ message: 'Trade saved', trade });
 });
 
 // ─────────────────────────────────────────────────────────────
 // ADMINISTRATOR API ROUTES
 // ─────────────────────────────────────────────────────────────
-
-// 1. ADMIN OVERVIEW & METRICS
-app.get('/api/admin/overview', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const totalUsers = db.users.length;
-  const verifiedUsers = db.users.filter((u) => u.emailVerified && u.phoneVerified).length;
-  const activeSessions = db.sessions.filter((s) => s.expiresAt > Date.now()).length;
-  const totalTrades = db.trades.length;
-  const totalVolume = db.trades.reduce((acc, t) => acc + (Number(t.stake) || 0), 0);
-  const netProfitLoss = db.trades.reduce((acc, t) => acc + (Number(t.profit) || 0), 0);
-  const adminsCount = db.users.filter((u) => u.role === 'admin').length;
-
-  return res.json({
-    metrics: {
-      totalUsers,
-      verifiedUsers,
-      activeSessions,
-      totalTrades,
-      totalVolume: Number(totalVolume.toFixed(2)),
-      netProfitLoss: Number(netProfitLoss.toFixed(2)),
-      adminsCount,
-    },
-  });
-});
-
-// 2. ADMIN USERS DIRECTORY
-app.get('/api/admin/users', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const sanitizedUsers = db.users.map((u) => ({
-    id: u.id,
-    email: u.email,
-    phone: u.phone,
-    role: u.role || 'user',
-    emailVerified: u.emailVerified,
-    phoneVerified: u.phoneVerified,
-    demoBalance: u.demoBalance,
-    realBalance: u.realBalance,
-    fullName: u.fullName || '',
-    country: u.country || 'International',
-    createdAt: u.createdAt,
-  }));
-
-  return res.json({ users: sanitizedUsers });
-});
-
-// 3. ADMIN CHANGE USER ROLE
-app.post('/api/admin/users/:id/role', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const targetId = req.params.id;
-  const { role } = req.body;
-
-  if (role !== 'admin' && role !== 'user') {
-    return res.status(400).json({ error: 'Role must be either "admin" or "user".' });
+app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const supabase = getSupabaseClient();
+    const [usersResult, sessionsResult, tradesResult] = await Promise.all([
+      supabase.from('users').select('id,role,email_verified,phone_verified', { count: 'exact' }),
+      supabase.from('sessions').select('token', { count: 'exact' }).gt('expires_at', Date.now()),
+      supabase.from('trades').select('trade_data'),
+    ]);
+    if (usersResult.error || sessionsResult.error || tradesResult.error) throw usersResult.error || sessionsResult.error || tradesResult.error;
+    const trades = (tradesResult.data || []).map((x: any) => x.trade_data || {});
+    return res.json({ metrics: {
+      totalUsers: usersResult.count || 0,
+      verifiedUsers: (usersResult.data || []).filter((u: any) => u.email_verified && u.phone_verified).length,
+      activeSessions: sessionsResult.count || 0, totalTrades: trades.length,
+      totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
+      netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profit) || 0), 0).toFixed(2)),
+      adminsCount: (usersResult.data || []).filter((u: any) => u.role === 'admin').length,
+    }});
+  } catch (error) {
+    console.error('[Supabase Admin Overview Error]:', error);
+    return res.status(500).json({ error: 'Could not load administrator overview.' });
   }
-
-  const targetUser = db.users.find((u) => u.id === targetId);
-  if (!targetUser) {
-    return res.status(404).json({ error: 'Target user not found.' });
+});
+app.get('/api/admin/users', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { data, error } = await getSupabaseClient().from('users').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    return res.json({ users: (data || []).map((row: any) => safeUserResponse(userFromRow(row))) });
+  } catch (error) {
+    console.error('[Supabase Admin Users Error]:', error);
+    return res.status(500).json({ error: 'Could not load users.' });
   }
-
-  // Prevent demoting the last admin
-  if (targetUser.role === 'admin' && role === 'user') {
-    const adminCount = db.users.filter((u) => u.role === 'admin').length;
-    if (adminCount <= 1) {
-      return res.status(400).json({ error: 'Cannot demote the last remaining administrator.' });
+});
+app.post('/api/admin/users/:id/role', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const role = req.body?.role;
+    if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: 'Role must be either "admin" or "user".' });
+    const supabase = getSupabaseClient();
+    const { data: target, error: findError } = await supabase.from('users').select('*').eq('id', req.params.id).maybeSingle();
+    if (findError) throw findError;
+    if (!target) return res.status(404).json({ error: 'Target user not found.' });
+    if (target.role === 'admin' && role === 'user') {
+      const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
+      if (error) throw error;
+      if ((count || 0) <= 1) return res.status(400).json({ error: 'Cannot demote the last remaining administrator.' });
     }
+    const { data, error } = await supabase.from('users').update({ role }).eq('id', req.params.id).select('*').single();
+    if (error) throw error;
+    return res.json({ message: `User ${target.email} role updated to ${role}.`, user: safeUserResponse(userFromRow(data)) });
+  } catch (error) {
+    console.error('[Supabase Role Update Error]:', error);
+    return res.status(500).json({ error: 'Could not update user role.' });
   }
-
-  targetUser.role = role;
-  saveDatabase(db);
-
-  return res.json({
-    message: `User ${targetUser.email} role updated to ${role}.`,
-    user: safeUserResponse(targetUser),
-  });
 });
-
-// 4. ADMIN ADJUST USER BALANCE
-app.post('/api/admin/users/:id/balance', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const targetId = req.params.id;
-  const { accountType, amount, operation } = req.body;
-
-  const targetUser = db.users.find((u) => u.id === targetId);
-  if (!targetUser) {
-    return res.status(404).json({ error: 'Target user not found.' });
+app.post('/api/admin/users/:id/balance', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { accountType, amount, operation } = req.body || {};
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: 'Please specify a valid positive numerical amount.' });
+    if (accountType !== 'real' && accountType !== 'demo') return res.status(400).json({ error: 'Account type must be real or demo.' });
+    const supabase = getSupabaseClient();
+    const { data: target, error: findError } = await supabase.from('users').select('*').eq('id', req.params.id).maybeSingle();
+    if (findError) throw findError;
+    if (!target) return res.status(404).json({ error: 'Target user not found.' });
+    const column = accountType === 'real' ? 'real_balance' : 'demo_balance';
+    const current = Number(target[column] || 0);
+    const updatedValue = operation === 'set' ? value : Math.max(0, current + value);
+    const { data, error } = await supabase.from('users').update({ [column]: updatedValue }).eq('id', req.params.id).select('*').single();
+    if (error) throw error;
+    return res.json({ message: `Account balance updated for ${target.email}.`, user: safeUserResponse(userFromRow(data)) });
+  } catch (error) {
+    console.error('[Supabase Balance Update Error]:', error);
+    return res.status(500).json({ error: 'Could not update user balance.' });
   }
-
-  const numAmount = Number(amount);
-  if (isNaN(numAmount) || numAmount < 0) {
-    return res.status(400).json({ error: 'Please specify a valid positive numerical amount.' });
-  }
-
-  if (accountType === 'real') {
-    if (operation === 'set') {
-      targetUser.realBalance = numAmount;
-    } else {
-      targetUser.realBalance = Math.max(0, targetUser.realBalance + numAmount);
+});
+app.post('/api/admin/create-admin', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { email, phone, password, fullName } = req.body || {};
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+    const normalizedEmail = normalizeEmail(email), normalizedPhone = phone ? normalizePhone(phone) : '';
+    if (!validateEmail(normalizedEmail)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+    const passCheck = validatePasswordSecurity(password);
+    if (!passCheck.isValid) return res.status(400).json({ error: passCheck.message });
+    const supabase = getSupabaseClient();
+    const { data: existing, error: findError } = await supabase.from('users').select('*').eq('email', normalizedEmail).maybeSingle();
+    if (findError) throw findError;
+    if (existing) {
+      const { data, error } = await supabase.from('users').update({ role: 'admin', email_verified: true, phone_verified: true }).eq('id', existing.id).select('*').single();
+      if (error) throw error;
+      return res.json({ message: `Existing user ${normalizedEmail} promoted to administrator.`, user: safeUserResponse(userFromRow(data)) });
     }
-  } else {
-    // default to demo
-    if (operation === 'set') {
-      targetUser.demoBalance = numAmount;
-    } else {
-      targetUser.demoBalance = Math.max(0, targetUser.demoBalance + numAmount);
+    if (!normalizedPhone || !validatePhone(normalizedPhone)) return res.status(400).json({ error: 'A valid international phone number is required for a new administrator.' });
+    const salt = crypto.randomBytes(16).toString('hex'), now = Date.now();
+    const newAdmin: UserRecord = {
+      id: `admin_${crypto.randomUUID()}`, email: normalizedEmail, phone: normalizedPhone,
+      passwordHash: hashPassword(password, salt), salt, role: 'admin', createdAt: now,
+      emailVerified: true, phoneVerified: true, demoBalance: 10000, realBalance: 0,
+      fullName: fullName || 'DevOptions Administrator', country: 'International',
+    };
+    const { error } = await supabase.from('users').insert(userToRow(newAdmin));
+    if (error) {
+      if (error.code === '23505') return res.status(409).json({ error: 'An account with this email or phone already exists.' });
+      throw error;
     }
+    return res.status(201).json({ message: 'New administrator account created successfully.', user: safeUserResponse(newAdmin) });
+  } catch (error) {
+    console.error('[Supabase Create Admin Error]:', error);
+    return res.status(500).json({ error: 'Could not create administrator account.' });
   }
-
-  saveDatabase(db);
-  return res.json({
-    message: `Account balance updated for ${targetUser.email}.`,
-    user: safeUserResponse(targetUser),
-  });
 });
-
-// 5. ADMIN CREATE ADMIN ACCOUNT
-app.post('/api/admin/create-admin', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const { email, phone, password, fullName } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
+app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.user!.id === req.params.id) return res.status(400).json({ error: 'Administrators cannot delete their own active account.' });
+    const supabase = getSupabaseClient();
+    const { data: target, error: findError } = await supabase.from('users').select('id,email,role').eq('id', req.params.id).maybeSingle();
+    if (findError) throw findError;
+    if (!target) return res.status(404).json({ error: 'User not found.' });
+    if (target.role === 'admin') {
+      const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
+      if (error) throw error;
+      if ((count || 0) <= 1) return res.status(400).json({ error: 'Cannot delete the last remaining administrator.' });
+    }
+    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+    if (error) throw error;
+    return res.json({ message: `User ${target.email} has been deleted.` });
+  } catch (error) {
+    console.error('[Supabase Delete User Error]:', error);
+    return res.status(500).json({ error: 'Could not delete user.' });
   }
-
-  const normEmail = normalizeEmail(email);
-  const normPhone = phone ? normalizePhone(phone) : '+18005550199';
-
-  const existing = db.users.find((u) => u.email === normEmail);
-  if (existing) {
-    existing.role = 'admin';
-    existing.emailVerified = true;
-    existing.phoneVerified = true;
-    saveDatabase(db);
-    return res.json({ message: `Existing user ${normEmail} promoted to administrator.`, user: safeUserResponse(existing) });
-  }
-
-  const salt = crypto.randomBytes(16).toString('hex');
-  const passwordHash = hashPassword(password, salt);
-  const newAdmin: UserRecord = {
-    id: `admin_${crypto.randomUUID().slice(0, 8)}`,
-    email: normEmail,
-    phone: normPhone,
-    passwordHash,
-    salt,
-    role: 'admin',
-    createdAt: Date.now(),
-    emailVerified: true,
-    phoneVerified: true,
-    demoBalance: 10000.0,
-    realBalance: 0.0,
-    fullName: fullName || 'DevOptions Administrator',
-    country: 'International',
-  };
-
-  db.users.push(newAdmin);
-  saveDatabase(db);
-
-  return res.status(201).json({
-    message: 'New administrator account created successfully.',
-    user: safeUserResponse(newAdmin),
-  });
-});
-
-// 6. ADMIN DELETE USER
-app.delete('/api/admin/users/:id', requireAdmin, (req: AuthenticatedRequest, res: Response) => {
-  const targetId = req.params.id;
-
-  if (req.user?.id === targetId) {
-    return res.status(400).json({ error: 'Administrators cannot delete their own active account.' });
-  }
-
-  const userIndex = db.users.findIndex((u) => u.id === targetId);
-  if (userIndex === -1) {
-    return res.status(404).json({ error: 'User not found.' });
-  }
-
-  const deletedUser = db.users[userIndex];
-  db.users.splice(userIndex, 1);
-  db.sessions = db.sessions.filter((s) => s.userId !== targetId);
-  saveDatabase(db);
-
-  return res.json({ message: `User ${deletedUser.email} has been deleted.` });
 });
 
 // ─────────────────────────────────────────────────────────────
