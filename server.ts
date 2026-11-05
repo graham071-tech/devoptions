@@ -253,90 +253,6 @@ function validatePasswordSecurity(password: string): { isValid: boolean; message
 }
 
 // ─────────────────────────────────────────────────────────────
-// PROVISION / SEED INITIAL ADMINISTRATOR ACCOUNTS
-// ─────────────────────────────────────────────────────────────
-function seedAdminAccounts() {
-  const defaultAdmins = [
-    {
-      email: 'admin@devoptions.io',
-      phone: '+18005550199',
-      password: 'Admin@DevOptions2026!',
-      fullName: 'DevOptions Master Admin',
-      country: 'Global Operations',
-      demoBalance: 10000.0,
-      realBalance: 0.0,
-    },
-    {
-      email: 'francisgraham071@gmail.com',
-      phone: '+12345678900',
-      password: 'Admin@DevOptions2026!',
-      fullName: 'Francis Graham (Admin)',
-      country: 'United States',
-      demoBalance: 10000.0,
-      realBalance: 0.0,
-    },
-  ];
-
-  let modified = false;
-
-  for (const adm of defaultAdmins) {
-    const existing = db.users.find((u) => u.email === adm.email);
-    if (!existing) {
-      const salt = crypto.randomBytes(16).toString('hex');
-      const passwordHash = hashPassword(adm.password, salt);
-      const newAdminUser: UserRecord = {
-        id: `admin_${crypto.randomUUID().slice(0, 8)}`,
-        email: adm.email,
-        phone: adm.phone,
-        passwordHash,
-        salt,
-        role: 'admin',
-        createdAt: Date.now(),
-        emailVerified: true,
-        phoneVerified: true,
-        demoBalance: adm.demoBalance,
-        realBalance: adm.realBalance,
-        fullName: adm.fullName,
-        country: adm.country,
-      };
-      db.users.push(newAdminUser);
-      modified = true;
-      console.log(`[DevOptions Auth] Provisioned Administrator Account: ${adm.email} | Initial Password: ${adm.password}`);
-    } else {
-      let changed = false;
-      if (existing.role !== 'admin') {
-        existing.role = 'admin';
-        changed = true;
-      }
-      if (!existing.emailVerified || !existing.phoneVerified) {
-        existing.emailVerified = true;
-        existing.phoneVerified = true;
-        changed = true;
-      }
-      if (existing.demoBalance !== 10000.0) {
-        existing.demoBalance = 10000.0;
-        changed = true;
-      }
-      if (existing.realBalance === 50000.0) {
-        existing.realBalance = 0.0;
-        changed = true;
-      }
-      if (changed) {
-        modified = true;
-        console.log(`[DevOptions Auth] Synchronized administrator status for existing account: ${existing.email}`);
-      }
-    }
-  }
-
-  if (modified) {
-    saveDatabase(db);
-  }
-}
-
-// Run initial admin seeding check
-seedAdminAccounts();
-
-// ─────────────────────────────────────────────────────────────
 // IN-MEMORY RATE LIMITING FOR AUTH BRUTE FORCE PROTECTION
 // ─────────────────────────────────────────────────────────────
 interface RateLimitBucket {
@@ -499,7 +415,6 @@ async function requireAuth(
     console.error('[Supabase Authentication Error]:', err);
     return res.status(500).json({ error: 'Authentication service unavailable.' });
   }
-}
 }
 
 function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -707,7 +622,6 @@ app.post(
       return res.status(500).json({ error: 'Registration service is unavailable.' });
     }
   }
-);
 );
 
 // 2. LOGIN
@@ -1019,18 +933,6 @@ app.get('/api/admin/overview', requireAdmin, (req: AuthenticatedRequest, res: Re
       netProfitLoss: Number(netProfitLoss.toFixed(2)),
       adminsCount,
     },
-    defaultAccounts: [
-      {
-        email: 'admin@devoptions.io',
-        role: 'admin',
-        description: 'System Master Administrator Account',
-      },
-      {
-        email: 'francisgraham071@gmail.com',
-        role: 'admin',
-        description: 'Primary Platform Administrator Account',
-      },
-    ],
   });
 });
 
@@ -1916,132 +1818,6 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
     console.error('[Paynecta Webhook Error]:', err);
     return res.status(500).json({ error: 'Webhook processing failed.' });
   }
-});
-  });
-
-  const config = paynectaService.getConfig();
-  // If webhook secret is configured, enforce strict verification
-  if (config.webhookSecret && !verification.isValid) {
-    console.warn('[Paynecta Webhook] Verification failed:', verification.reason);
-    return res.status(401).json({
-      error: 'Invalid webhook signature or expired timestamp.',
-      reason: verification.reason,
-    });
-  }
-
-  const event = req.body;
-  const merchantReference =
-    event.merchant_reference ||
-    event.data?.merchant_reference ||
-    event.payment?.merchant_reference;
-
-  const sessionId =
-    event.session_id ||
-    event.id ||
-    event.data?.session_id ||
-    event.data?.id;
-
-  const providerReference =
-    event.receipt_number ||
-    event.data?.receipt_number ||
-    event.transaction_id ||
-    event.data?.transaction_id ||
-    event.payment?.reference;
-
-  if (!merchantReference && !sessionId && !providerReference) {
-    return res.status(400).json({ error: 'Missing merchant reference or session ID in webhook event.' });
-  }
-
-  if (!db.deposits) db.deposits = [];
-  const deposit = db.deposits.find(
-    (d) =>
-      (merchantReference && d.merchantReference === merchantReference) ||
-      (sessionId && d.sessionId === sessionId) ||
-      (providerReference && d.providerReference === providerReference)
-  );
-
-  if (!deposit) {
-    console.warn('[Paynecta Webhook] No matching deposit for reference:', merchantReference || sessionId);
-    return res.json({ received: true, note: 'Deposit not found in local records' });
-  }
-
-  const eventType = String(event.event || event.type || '').toLowerCase();
-  const eventStatus = String(
-    event.status ||
-    event.data?.status ||
-    event.payment?.status ||
-    ''
-  ).toLowerCase();
-
-  // 1. PAYMENT SUCCEEDED (CREDIT USER IDEMPOTENTLY)
-  if (
-    eventStatus === 'succeeded' ||
-    eventStatus === 'completed' ||
-    eventStatus === 'paid' ||
-    eventType.includes('payment.succeeded') ||
-    eventType.includes('checkout.session.completed')
-  ) {
-    if (deposit.status !== 'succeeded') {
-      deposit.status = 'succeeded';
-      deposit.confirmedAmountKes = deposit.amountKes;
-      deposit.providerReference = providerReference || 'PAYNECTA_WEBHOOK';
-      deposit.receiptNumber = providerReference;
-      deposit.confirmedAt = Date.now();
-      deposit.updatedAt = Date.now();
-
-      const targetUser = db.users.find((u) => u.id === deposit.userId);
-      if (targetUser) {
-        targetUser.realBalance = Number((targetUser.realBalance + deposit.amountUsd).toFixed(2));
-      }
-
-      // Record in ledger
-      const txRecord = {
-        id: `tx_${deposit.id}`,
-        userId: deposit.userId,
-        type: 'deposit',
-        method: 'mpesa',
-        amountUSD: deposit.amountUsd,
-        amountLocal: deposit.amountKes,
-        localCurrency: 'KES',
-        feeUSD: 0,
-        netAmountUSD: deposit.amountUsd,
-        status: 'completed',
-        reference: deposit.providerReference || deposit.merchantReference,
-        createdAt: Date.now(),
-        details: {
-          merchantReference: deposit.merchantReference,
-          providerReceipt: deposit.receiptNumber,
-          gateway: 'Paynecta M-Pesa',
-          source: 'webhook',
-        },
-      };
-
-      if (!db.trades) db.trades = [];
-      db.trades.push(txRecord);
-
-      saveDatabase(db);
-      console.log(`[Paynecta Webhook] Successfully credited deposit ${deposit.id} for user ${deposit.userId}`);
-    }
-  } else if (
-    eventStatus === 'failed' ||
-    eventStatus === 'declined' ||
-    eventType.includes('payment.failed')
-  ) {
-    deposit.status = 'failed';
-    deposit.failureReason = event.failure_reason || event.data?.failure_reason || 'Payment failed.';
-    deposit.updatedAt = Date.now();
-    saveDatabase(db);
-  } else if (
-    eventStatus === 'cancelled' ||
-    eventType.includes('payment.cancelled')
-  ) {
-    deposit.status = 'cancelled';
-    deposit.failureReason = 'Payment was cancelled by user.';
-    deposit.updatedAt = Date.now();
-    saveDatabase(db);
-  }
-
-  return res.json({ received: true });
 });
 
 // 12. HEALTH CHECK
