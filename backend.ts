@@ -857,7 +857,9 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), 
       || !['demo', 'real'].includes(mode) || trade.mode !== mode
       || trade.status !== 'active' || !Number.isFinite(trade.stake)
       || trade.stake <= 0 || trade.stake > 1000000
-      || !Number.isFinite(trade.potentialPayout) || trade.potentialPayout < trade.stake
+      || !Number.isFinite(trade.payoutRate) || trade.payoutRate <= 0 || trade.payoutRate > 1
+      || !Number.isFinite(trade.potentialPayout)
+      || Math.abs(trade.potentialPayout - Number((trade.stake * (1 + trade.payoutRate)).toFixed(2))) > 0.001
       || !Number.isFinite(trade.entryPrice) || !Number.isFinite(trade.durationTicks)
       || trade.durationTicks < 1 || trade.durationTicks > 10000) {
       return res.status(400).json({ error: 'Invalid simulated trade details.' });
