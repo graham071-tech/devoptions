@@ -1369,10 +1369,13 @@ app.post(
       const now = Date.now();
 
       if (verification.status === 'succeeded') {
-        if (
-          verification.confirmedAmountKes !== undefined &&
-          Math.round(verification.confirmedAmountKes) !== deposit.amountKes
-        ) {
+        if (verification.confirmedAmountKes === undefined) {
+          console.error('[Paynecta Verification] Successful response omitted the confirmed amount:', deposit.id);
+          return res.status(409).json({
+            error: 'Paynecta did not return a confirmed payment amount. No balance was credited.',
+          });
+        }
+        if (Math.round(verification.confirmedAmountKes) !== deposit.amountKes) {
           console.error('[Paynecta Amount Mismatch]', {
             depositId: deposit.id,
             expectedKes: deposit.amountKes,
@@ -1399,8 +1402,7 @@ app.post(
             p_deposit_id: deposit.id,
             p_provider_reference: providerReference,
             p_receipt_number: receiptNumber,
-            p_confirmed_amount_kes:
-              verification.confirmedAmountKes ?? deposit.amountKes,
+            p_confirmed_amount_kes: verification.confirmedAmountKes,
             p_source: 'verification',
           }
         );
@@ -1424,8 +1426,7 @@ app.post(
           status: 'succeeded',
           providerReference,
           receiptNumber: receiptNumber || undefined,
-          confirmedAmountKes:
-            verification.confirmedAmountKes ?? deposit.amountKes,
+          confirmedAmountKes: verification.confirmedAmountKes,
           confirmedAt: now,
           updatedAt: now,
         };
