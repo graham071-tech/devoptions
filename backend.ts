@@ -835,7 +835,7 @@ app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, 
       totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
       netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profit) || 0), 0).toFixed(2)),
       adminsCount: (usersResult.data || []).filter((u: any) => u.role === 'admin').length,
-    }});
+    }, defaultAccounts: []});
   } catch (error) {
     console.error('[Supabase Admin Overview Error]:', error);
     return res.status(500).json({ error: 'Could not load administrator overview.' });
