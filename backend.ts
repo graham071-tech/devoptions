@@ -1105,8 +1105,11 @@ app.post(
       const config = paynectaService.getConfig();
       if (amountKes < config.minDepositKes) {
         return res.status(400).json({
-          error: `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. $${config.minDepositUsd.toFixed(2)} USD).`,
+          error: `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. ${config.minDepositUsd.toFixed(2)} USD).`,
         });
+      }
+      if (amountKes > 250000) {
+        return res.status(400).json({ error: 'The maximum single Paynecta M-Pesa deposit is KES 250,000.' });
       }
 
       const { isReady, missing } = paynectaService.isConfigured();
