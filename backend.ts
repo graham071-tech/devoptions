@@ -1686,7 +1686,7 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       return res.json({ received: true, note: 'Deposit not found.' });
     }
 
-    const eventType = String(event.event || event.type || '').toLowerCase();
+    const eventType = String(req.headers['paynecta-event'] || event.event || event.data?.event || event.type || '').toLowerCase();
 
     const eventStatus = String(
       event.status ||
@@ -1699,6 +1699,7 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       eventStatus === 'succeeded' ||
       eventStatus === 'completed' ||
       eventStatus === 'paid' ||
+      eventType.includes('payment.settled') ||
       eventType.includes('payment.succeeded') ||
       eventType.includes('checkout.session.completed')
     ) {
@@ -1736,8 +1737,31 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
         `[Paynecta Webhook] Deposit ${deposit.id} processed. Already credited: ${creditResult.alreadyCredited}`
       );
     } else if (
+      eventStatus === 'cancelled' ||
+      eventStatus === 'abandoned' ||
+      eventStatus === 'expired' ||
+      eventType.includes('payment.cancelled')
+    ) {
+      const { error } = await supabase
+        .from('deposits')
+        .update({
+          status: 'cancelled',
+          failure_reason: 'Payment was cancelled by user.',
+          updated_at: Date.now(),
+        })
+        .eq('id', deposit.id)
+        .neq('status', 'succeeded');
+
+      if (error) {
+        console.error('[Paynecta Webhook] Cancel status update:', error);
+        return res.status(500).json({ error: 'Could not update deposit status.' });
+      }
+    } else if (
       eventStatus === 'failed' ||
       eventStatus === 'declined' ||
+      eventStatus === 'refused' ||
+      eventStatus === 'insufficient_funds' ||
+      eventStatus === 'timed_out' ||
       eventType.includes('payment.failed')
     ) {
       const { error } = await supabase
@@ -1755,24 +1779,6 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
 
       if (error) {
         console.error('[Paynecta Webhook] Failed status update:', error);
-        return res.status(500).json({ error: 'Could not update deposit status.' });
-      }
-    } else if (
-      eventStatus === 'cancelled' ||
-      eventType.includes('payment.cancelled')
-    ) {
-      const { error } = await supabase
-        .from('deposits')
-        .update({
-          status: 'cancelled',
-          failure_reason: 'Payment was cancelled by user.',
-          updated_at: Date.now(),
-        })
-        .eq('id', deposit.id)
-        .neq('status', 'succeeded');
-
-      if (error) {
-        console.error('[Paynecta Webhook] Cancel status update:', error);
         return res.status(500).json({ error: 'Could not update deposit status.' });
       }
     }
