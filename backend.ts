@@ -313,7 +313,7 @@ async function requireAuth(
 
     const { data: row, error: userError } = await supabase
       .from('users')
-      .select('*')
+      .select('id,email,phone,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
       .eq('id', session.user_id)
       .maybeSingle();
 
@@ -643,7 +643,7 @@ app.post(
 function userFromRow(row: any): UserRecord {
   return {
     id: row.id, email: row.email, phone: row.phone,
-    passwordHash: row.password_hash, salt: row.salt, role: row.role,
+    passwordHash: row.password_hash || '', salt: row.salt || '', role: row.role,
     createdAt: Number(row.created_at), emailVerified: Boolean(row.email_verified),
     phoneVerified: Boolean(row.phone_verified),
     emailVerificationCode: row.email_verification_code || undefined,
