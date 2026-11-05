@@ -330,35 +330,7 @@ async function requireAuth(
       });
     }
 
-    const user: UserRecord = {
-      id: row.id,
-      email: row.email,
-      phone: row.phone,
-      passwordHash: row.password_hash,
-      salt: row.salt,
-      role: row.role,
-      createdAt: Number(row.created_at),
-      emailVerified: row.email_verified,
-      phoneVerified: row.phone_verified,
-      emailVerificationCode: row.email_verification_code || undefined,
-      emailVerificationExpires: row.email_verification_expires == null
-        ? undefined
-        : Number(row.email_verification_expires),
-      phoneVerificationCode: row.phone_verification_code || undefined,
-      phoneVerificationExpires: row.phone_verification_expires == null
-        ? undefined
-        : Number(row.phone_verification_expires),
-      resetPasswordToken: row.reset_password_token || undefined,
-      resetPasswordExpires: row.reset_password_expires == null
-        ? undefined
-        : Number(row.reset_password_expires),
-      demoBalance: Number(row.demo_balance),
-      realBalance: Number(row.real_balance),
-      fullName: row.full_name || '',
-      country: row.country || 'International',
-      theme: row.theme || undefined,
-      soundEnabled: row.sound_enabled ?? undefined,
-    };
+    const user: UserRecord = userFromRow(row);
 
     req.user = user;
     req.sessionToken = token;
