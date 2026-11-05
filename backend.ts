@@ -7,7 +7,6 @@ import { getSupabaseClient } from './src/services/supabaseService';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 export { app };
 
 // Restrict credentialed cross-origin requests to configured application origins.
