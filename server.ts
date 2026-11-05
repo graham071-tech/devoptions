@@ -1194,9 +1194,31 @@ app.post(
         updatedAt: Date.now(),
       };
 
-      if (!db.deposits) db.deposits = [];
-      db.deposits.push(newDeposit);
-      saveDatabase(db);
+            const supabase = getSupabaseClient();
+
+      const { error: depositError } = await supabase
+        .from('deposits')
+        .insert({
+          id: newDeposit.id,
+          user_id: newDeposit.userId,
+          merchant_reference: newDeposit.merchantReference,
+          amount_kes: newDeposit.amountKes,
+          amount_subunits: newDeposit.amountSubunits,
+          amount_usd: newDeposit.amountUsd,
+          currency: newDeposit.currency,
+          session_id: newDeposit.sessionId,
+          checkout_url: newDeposit.checkoutUrl,
+          status: newDeposit.status,
+          created_at: newDeposit.createdAt,
+          updated_at: newDeposit.updatedAt,
+        });
+
+      if (depositError) {
+        console.error('[Supabase Deposit Save Error]:', depositError);
+        return res.status(500).json({
+          error: 'Could not save deposit. Please contact support.',
+        });
+      }
 
       return res.status(201).json({
         message: 'Paynecta checkout session created successfully.',
