@@ -15,6 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createClient } from '@supabase/supabase-js';
 
 type LegacyUser = {
@@ -62,12 +63,20 @@ async function main() {
     throw new Error('Missing SUPABASE_URL or SUPABASE_SECRET_KEY. Use server-side secrets only.');
   }
 
+  let legacyText: string;
   const legacyPath = path.resolve(process.cwd(), 'data/db.json');
-  if (!fs.existsSync(legacyPath)) {
-    throw new Error('data/db.json was not found. Run this before removing the legacy database file.');
+  if (fs.existsSync(legacyPath)) {
+    legacyText = fs.readFileSync(legacyPath, 'utf8');
+  } else {
+    // Recover the original committed file from the base branch's Git history.
+    try {
+      legacyText = execFileSync('git', ['show', 'origin/main:data/db.json'], { encoding: 'utf8' });
+    } catch {
+      legacyText = execFileSync('git', ['show', 'main:data/db.json'], { encoding: 'utf8' });
+    }
   }
 
-  const legacy = JSON.parse(fs.readFileSync(legacyPath, 'utf8')) as {
+  const legacy = JSON.parse(legacyText) as {
     users?: LegacyUser[];
     trades?: Record<string, any>[];
     deposits?: LegacyDeposit[];
