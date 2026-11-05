@@ -1,14 +1,20 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "noEmit": true
   },
   "include": [
     "backend.ts",
     "api/**/*.ts",
     "scripts/**/*.ts",
-    "src/services/**/*.ts"
+    "src/services/**/*.ts",
+    "dev-server.ts"
   ],
-  "exclude": ["dist", "node_modules"]
+  "exclude": [
+    "dist",
+    "node_modules"
+  ]
 }
