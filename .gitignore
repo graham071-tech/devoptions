@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Persistent local database files must never be committed
+data/
