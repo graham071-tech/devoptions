@@ -392,21 +392,79 @@ function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?
     fullName: user.fullName || '',
     country: user.country || 'International',
     createdAt: user.createdAt,
-    emailProviderConfigured: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY),
-    smsProviderConfigured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+    emailProviderConfigured: hasSmtpConfig(),
+    smsProviderConfigured: hasTwilioConfig(),
     devNotice:
       !user.emailVerified || !user.phoneVerified
         ? {
             emailOtp: process.env.NODE_ENV !== 'production' && !user.emailVerified ? lastEmailOtp || user.emailVerificationCode : undefined,
             phoneOtp: process.env.NODE_ENV !== 'production' && !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
-            info: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY)
-              ? 'Verification code has been dispatched to your registered email.'
-              : 'External email service is not yet configured on this server. Use the sandbox OTP code provided below to verify your account.',
-            emailConfigured: Boolean(process.env.SMTP_HOST || process.env.SENDGRID_API_KEY),
-            smsConfigured: Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN),
+            info: process.env.NODE_ENV !== 'production'
+              ? 'Development verification codes are shown in this notice.'
+              : 'Verification codes are sent through the configured email and SMS providers. If a code does not arrive, contact support.',
+            emailConfigured: hasSmtpConfig(),
+            smsConfigured: hasTwilioConfig(),
           }
         : undefined,
   };
+}
+
+// Verification delivery is server-side only. Codes are never returned to production clients.
+function hasSmtpConfig(): boolean {
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_FROM);
+}
+function hasTwilioConfig(): boolean {
+  return Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_PHONE_NUMBER);
+}
+async function sendEmailCode(to: string, code: string, purpose: 'verification' | 'password reset'): Promise<void> {
+  if (!hasSmtpConfig()) throw new Error('SMTP delivery is not configured.');
+  const nodemailer = await import('nodemailer');
+  const port = Number(process.env.SMTP_PORT || 587);
+  const transporter = nodemailer.default.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure: port === 465,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to,
+    subject: purpose === 'verification' ? 'Your DevOptions verification code' : 'Your DevOptions password reset code',
+    text: `Your DevOptions ${purpose} code is ${code}. It expires in ${purpose === 'verification' ? '15' : '30'} minutes. If you did not request this, ignore this message.`,
+  });
+}
+async function sendSmsCode(to: string, code: string, purpose: 'verification' | 'password reset'): Promise<void> {
+  if (!hasTwilioConfig()) throw new Error('Twilio SMS delivery is not configured.');
+  const sid = process.env.TWILIO_ACCOUNT_SID!;
+  const credentials = Buffer.from(`${sid}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
+  const body = new URLSearchParams({
+    To: to,
+    From: process.env.TWILIO_PHONE_NUMBER!,
+    Body: `Your DevOptions ${purpose} code is ${code}. It expires in ${purpose === 'verification' ? '15' : '30'} minutes.`,
+  });
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  if (!response.ok) throw new Error(`Twilio message delivery failed (${response.status}).`);
+}
+async function dispatchVerificationCodes(user: UserRecord, emailCode?: string, phoneCode?: string): Promise<void> {
+  const tasks: Promise<void>[] = [];
+  if (emailCode && hasSmtpConfig()) tasks.push(sendEmailCode(user.email, emailCode, 'verification'));
+  if (phoneCode && hasTwilioConfig()) tasks.push(sendSmsCode(user.phone, phoneCode, 'verification'));
+  const results = await Promise.allSettled(tasks);
+  results.forEach((result) => {
+    if (result.status === 'rejected') console.error('[Verification Delivery Error]:', result.reason instanceof Error ? result.reason.message : 'Delivery failed');
+  });
+}
+async function dispatchPasswordReset(user: UserRecord, isEmail: boolean, code: string): Promise<void> {
+  try {
+    if (isEmail) await sendEmailCode(user.email, code, 'password reset');
+    else await sendSmsCode(user.phone, code, 'password reset');
+  } catch (error) {
+    console.error('[Password Reset Delivery Error]:', error instanceof Error ? error.message : 'Delivery failed');
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -556,6 +614,7 @@ app.post(
       setSessionCookie(res, sessionToken);
 
       const isDevelopment = process.env.NODE_ENV !== 'production';
+      await dispatchVerificationCodes(newUser, emailOtp, phoneOtp);
 
       if (isDevelopment) {
         console.log(`[DevOptions Auth] New User Registered: ${normEmail}`);
@@ -706,6 +765,7 @@ app.post('/api/auth/resend-code', requireAuth, async (req: AuthenticatedRequest,
     const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
     if (error) throw error;
     const updated = userFromRow(data);
+    await dispatchVerificationCodes(updated, type === 'email' ? otp : undefined, type === 'phone' ? otp : undefined);
     return res.json({
       message: `New ${type} verification code generated.`,
       user: safeUserResponse(updated, type === 'email' && process.env.NODE_ENV !== 'production' ? otp : undefined,
@@ -729,9 +789,10 @@ app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req:
     const generic = 'If an account matches that contact method, a verification code has been dispatched.';
     if (!row) return res.json({ message: generic });
     const otp = generateSecureOtp(), expiry = Date.now() + 30 * 60 * 1000;
-    const { error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id);
+    const { data: resetUserRow, error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id).select('*').single();
     if (updateError) throw updateError;
-    // OTP is returned only outside production until an email/SMS delivery provider is configured.
+    await dispatchPasswordReset(userFromRow(resetUserRow), isEmail, otp);
+    // OTP is returned only in development; production codes are delivered out-of-band.
     return res.json({ message: generic, ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}) });
   } catch (error) {
     console.error('[Supabase Forgot Password Error]:', error);
