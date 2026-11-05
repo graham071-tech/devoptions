@@ -206,7 +206,7 @@ class PaynectaService {
 
         if (res.ok) {
           const data = await res.json();
-          const accessToken = data.access_token || data.token || data.data?.access_token;
+          const accessToken = data.access_token || data.token || data.data?.access_token || data.data?.token;
           const expiresInSeconds = Number(data.expires_in || data.data?.expires_in) || 3600;
 
           if (accessToken) {
