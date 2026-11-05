@@ -1,38 +1,36 @@
 import express, { Request, Response, NextFunction } from 'express';
-import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
 import { paynectaService } from './src/services/paynectaService';
 import { getSupabaseClient } from './src/services/supabaseService';
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
 const PORT = process.env.PORT || 3000;
+export { app };
 
-// CORS & Credential Support for cross-domain and secure cookies
+// Restrict credentialed cross-origin requests to configured application origins.
+const allowedOrigins = new Set(
+  [process.env.APP_URL, process.env.APP_BASE_URL, process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '']
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.replace(/\/+$/, ''))
+);
+if (process.env.NODE_ENV !== 'production') {
+  allowedOrigins.add('http://localhost:3000');
+  allowedOrigins.add('http://localhost:5173');
+}
 app.use((req: Request, res: Response, next: NextFunction) => {
   const origin = req.headers.origin;
-  if (origin) {
+  if (origin && allowedOrigins.has(origin.replace(/\/+$/, ''))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-auth-token, paynecta-signature, paynecta-timestamp'
-  );
-
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
+  res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, x-auth-token, paynecta-signature, paynecta-timestamp');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
@@ -87,13 +85,6 @@ function clearSessionCookie(res: Response) {
 // ─────────────────────────────────────────────────────────────
 // DATA PERSISTENCE & DATABASE LAYER
 // ─────────────────────────────────────────────────────────────
-const DATA_DIR = path.resolve(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
-
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
 interface UserRecord {
   id: string;
   email: string;
@@ -144,43 +135,6 @@ export interface DepositRecord {
   updatedAt: number;
   confirmedAt?: number;
 }
-
-interface DatabaseSchema {
-  users: UserRecord[];
-  sessions: SessionRecord[];
-  trades: any[];
-  deposits: DepositRecord[];
-}
-
-function loadDatabase(): DatabaseSchema {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, 'utf-8');
-      const parsed = JSON.parse(data);
-      return {
-        users: parsed.users || [],
-        sessions: parsed.sessions || [],
-        trades: parsed.trades || [],
-        deposits: parsed.deposits || [],
-      };
-    }
-  } catch (err) {
-    console.error('Failed to load database file, initializing empty schema:', err);
-  }
-  return { users: [], sessions: [], trades: [], deposits: [] };
-}
-
-function saveDatabase(db: DatabaseSchema) {
-  try {
-    const tempFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(db, null, 2), 'utf-8');
-    fs.renameSync(tempFile, DB_FILE);
-  } catch (err) {
-    console.error('Failed to save database file:', err);
-  }
-}
-
-let db = loadDatabase();
 
 // ─────────────────────────────────────────────────────────────
 // SECURITY & CRYPTOGRAPHY UTILITIES
@@ -417,8 +371,8 @@ async function requireAuth(
   }
 }
 
-function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  requireAuth(req, res, () => {
+async function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+  await requireAuth(req, res, () => {
     if (!req.user || req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Access denied: Administrator privileges required.' });
     }
@@ -1730,33 +1684,19 @@ app.get('/api/health', (req: Request, res: Response) => {
   return res.json({ status: 'ok', service: 'DevOptions Backend', timestamp: Date.now() });
 });
 
-// ─────────────────────────────────────────────────────────────
-// VITE DEV SERVER OR STATIC PRODUCTION SERVING
-// ─────────────────────────────────────────────────────────────
-async function startServer() {
-  const isDev = process.env.NODE_ENV !== 'production';
-
-  if (isDev) {
+// Local development only. Vercel imports the Express app as a serverless function.
+if (!process.env.VERCEL) {
+  const startServer = async () => {
     const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+    const vite = await createViteServer({ server: { middlewareMode: true }, appType: 'spa' });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+    app.listen(Number(PORT), '0.0.0.0', () => {
+      console.log(`[DevOptions] Development server listening on http://0.0.0.0:${PORT}`);
     });
-  }
-
-  app.listen(Number(PORT), '0.0.0.0', () => {
-    console.log(`[DevOptions] Server listening on http://0.0.0.0:${PORT} (mode: ${isDev ? 'dev' : 'prod'})`);
+  };
+  startServer().catch((error) => {
+    console.error('Fatal error starting DevOptions server:', error);
+    process.exit(1);
   });
 }
-
-startServer().catch((err) => {
-  console.error('Fatal error starting DevOptions server:', err);
-  process.exit(1);
-});
+export default app;
