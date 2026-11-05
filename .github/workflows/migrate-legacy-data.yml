@@ -40,3 +40,5 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: npx tsx scripts/migrate-legacy-data.ts
+
+# One-time migration approved by the repository owner on 2026-11-05.
