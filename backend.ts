@@ -1004,6 +1004,14 @@ app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedReques
       if (error) throw error;
       if ((count || 0) <= 1) return res.status(400).json({ error: 'Cannot delete the last remaining administrator.' });
     }
+    const { count: depositCount, error: depositCheckError } = await supabase
+      .from('deposits').select('id', { count: 'exact', head: true }).eq('user_id', req.params.id);
+    if (depositCheckError) throw depositCheckError;
+    if ((depositCount || 0) > 0) {
+      return res.status(409).json({
+        error: 'This account has payment records and cannot be deleted. Keep the account for financial audit history.',
+      });
+    }
     const { error } = await supabase.from('users').delete().eq('id', req.params.id);
     if (error) throw error;
     return res.json({ message: `User ${target.email} has been deleted.` });
