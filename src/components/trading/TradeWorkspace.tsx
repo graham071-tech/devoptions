@@ -10,6 +10,7 @@ import {
 import { SYNTHETIC_MARKETS } from '../../data/syntheticMarkets';
 import { derivWsService } from '../../services/derivWs';
 import { storage } from '../../services/storage';
+import { authClient } from '../../services/authClient';
 import { audioEffects } from '../../services/audioEffects';
 import { extractLastDigit } from '../../utils/indicators';
 import { marketScanner, MarketScanResult } from '../../services/marketScanner';
@@ -217,6 +218,37 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     }
   }, [sessionStats, botStatus, botConfig]);
 
+  const placementInProgressRef = useRef(false);
+
+  const submitSimulatedTrade = async (trade: Trade) => {
+    if (placementInProgressRef.current) return;
+    placementInProgressRef.current = true;
+    try {
+      if (authClient.isAuthenticated()) {
+        const balances = await authClient.placeTrade(trade, trade.mode);
+        const updatedProfile = { ...profile, ...balances };
+        onUpdateProfile(updatedProfile);
+        storage.saveUserProfile(updatedProfile);
+      } else {
+        if (trade.mode === 'real') {
+          throw new Error('Please sign in before using your deposited balance.');
+        }
+        if (profile.demoBalance < trade.stake) {
+          throw new Error('Insufficient demo balance.');
+        }
+        const updatedProfile = { ...profile, demoBalance: Number((profile.demoBalance - trade.stake).toFixed(2)) };
+        onUpdateProfile(updatedProfile);
+        storage.saveUserProfile(updatedProfile);
+      }
+      setActiveTrades((prev) => [trade, ...prev]);
+      audioEffects.playTradePlaced();
+    } catch (error) {
+      showToast('error', 'Trade Not Placed', error instanceof Error ? error.message : 'Could not place simulated trade.');
+    } finally {
+      placementInProgressRef.current = false;
+    }
+  };
+
   // Bot placement execution
   const handleBotPlaceTrade = (cfg: BotConfig, quote: number) => {
     const availableBalance =
@@ -249,8 +281,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       strategyName: 'DevOptions Automated Bot',
     };
 
-    setActiveTrades((prev) => [newTrade, ...prev]);
-    audioEffects.playTradePlaced();
+    void submitSimulatedTrade(newTrade);
   };
 
   // Bot Controls
@@ -321,9 +352,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       strategyName: 'Manual Execution',
     };
 
-    setActiveTrades((prev) => [newTrade, ...prev]);
-    audioEffects.playTradePlaced();
-    showToast('info', `Order Placed: ${type}`, `Stake $${manualStake} on ${selectedMarket.displayName}`);
+    void submitSimulatedTrade(newTrade);
   };
 
   const availableBalance =
