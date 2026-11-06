@@ -43,4 +43,4 @@ jobs:
 
 # One-time migration approved by the repository owner on 2026-11-05.
 # Authentication fix: direct REST requests with apikey-only auth and credential preflight.
-# [migrate-legacy] Owner-approved migration run after correcting auth handling.
+# [migrate-legacy] Owner-approved migration run after replacing the Supabase secret key.
