@@ -16,7 +16,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { createClient } from '@supabase/supabase-js';
 
 type LegacyUser = {
   id: string;
@@ -102,20 +101,52 @@ async function main() {
     throw new Error('The legacy database is empty; refusing to run an empty migration.');
   }
 
-  // Supabase's new sb_secret_* keys are opaque API keys, not JWTs.
-  // Older supabase-js clients may also send the key as Authorization: Bearer,
-  // which makes the gateway try to parse it as a JWT and reject it.
-  // For this one-time database migration, send the secret only as apikey.
-  const supabase = createClient(url, secret, {
-    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
-    global: {
-      fetch: (input, init = {}) => {
-        const headers = new Headers(init.headers);
-        headers.delete('Authorization');
-        return fetch(input, { ...init, headers });
-      },
-    },
+  // New Supabase sb_secret_* keys are opaque API keys, not JWTs.
+  // Use the REST API directly so the key is sent ONLY in the apikey header.
+  // This avoids SDK versions that also copy the API key into Authorization.
+  const baseUrl = url.replace(/\\/+$/, '');
+  const apiKey = secret.trim();
+  const apiHeaders = {
+    apikey: apiKey,
+    Accept: 'application/json',
+  };
+
+  // Validate the credential against the REST gateway before touching any data.
+  // The REST OpenAPI root is restricted to service-role/secret credentials.
+  const authCheck = await fetch(baseUrl + '/rest/v1/', {
+    method: 'GET',
+    headers: { ...apiHeaders, Accept: 'application/openapi+json' },
   });
+  if (!authCheck.ok) {
+    const details = (await authCheck.text()).slice(0, 1000);
+    throw new Error(
+      'Supabase credential preflight failed (HTTP ' + authCheck.status + '): ' +
+      (details || authCheck.statusText)
+    );
+  }
+
+  async function upsertRows(table: string, rows: Record<string, unknown>[], context: string) {
+    if (!rows.length) return;
+    const response = await fetch(
+      baseUrl + '/rest/v1/' + table + '?on_conflict=id',
+      {
+        method: 'POST',
+        headers: {
+          ...apiHeaders,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates,return=minimal',
+        },
+        body: JSON.stringify(rows),
+      }
+    );
+    if (!response.ok) {
+      const details = (await response.text()).slice(0, 1000);
+      throw new Error(
+        context + ' failed (HTTP ' + response.status + '): ' +
+        (details || response.statusText)
+      );
+    }
+  }
 
   // Keep password hashes/salts so users retain their passwords. Never copy
   // old sessions, OTPs, password-reset tokens or their expiry timestamps.
@@ -144,20 +175,18 @@ async function main() {
   }));
 
   if (userRows.length) {
-    const { error } = await supabase.from('users').upsert(userRows, { onConflict: 'id' });
-    if (error) throw new Error('Users migration failed: ' + error.message);
+    await upsertRows('users', userRows, 'Users migration');
   }
 
   // Keep all historical trade/ledger records, if any.
   for (const t of trades) {
     if (!t?.id || !t?.userId) continue;
-    const { error } = await supabase.from('trades').upsert({
+    await upsertRows('trades', [{
       id: String(t.id),
       user_id: String(t.userId),
       trade_data: t,
       recorded_at: Number(t.recordedAt ?? t.createdAt) || Date.now(),
-    }, { onConflict: 'id' });
-    if (error) throw new Error('Trade migration failed for ' + String(t.id) + ': ' + error.message);
+    }], 'Trade migration for ' + String(t.id));
   }
 
   // Preserve pending and completed Paynecta deposits exactly as recorded.
@@ -182,8 +211,7 @@ async function main() {
   }));
 
   if (depositRows.length) {
-    const { error } = await supabase.from('deposits').upsert(depositRows, { onConflict: 'id' });
-    if (error) throw new Error('Deposits migration failed: ' + error.message);
+    await upsertRows('deposits', depositRows, 'Deposits migration');
   }
 
   console.log('Legacy data migration completed.');
