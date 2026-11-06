@@ -42,4 +42,5 @@ jobs:
         run: npx tsx scripts/migrate-legacy-data.ts
 
 # One-time migration approved by the repository owner on 2026-11-05.
-# Authentication fix: use the opaque Supabase secret key as apikey only.
+# Authentication fix: direct REST requests with apikey-only auth and credential preflight.
+# [migrate-legacy] Owner-approved migration run after correcting auth handling.
