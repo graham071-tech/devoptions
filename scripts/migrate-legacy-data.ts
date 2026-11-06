@@ -104,7 +104,7 @@ async function main() {
   // New Supabase sb_secret_* keys are opaque API keys, not JWTs.
   // Use the REST API directly so the key is sent ONLY in the apikey header.
   // This avoids SDK versions that also copy the API key into Authorization.
-  const baseUrl = url.replace(/\\/+$/, '');
+  const baseUrl = url.replace(/\/+$/, '');
   const apiKey = secret.trim();
   const apiHeaders = {
     apikey: apiKey,
