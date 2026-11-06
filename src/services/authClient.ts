@@ -127,6 +127,31 @@ class AuthClient {
     };
   }
 
+  private async readResponse(res: Response): Promise<any> {
+    const contentType = res.headers.get('content-type') || '';
+    const body = await res.text();
+
+    if (contentType.includes('application/json')) {
+      try {
+        return body ? JSON.parse(body) : {};
+      } catch {
+        throw new Error(`Server returned invalid JSON (HTTP ${res.status}). Please try again.`);
+      }
+    }
+
+    // Vercel and proxy errors are often HTML. Avoid exposing a raw JSON parse error.
+    const plainMessage = body
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 220);
+
+    const detail = plainMessage || `Unexpected response type: ${contentType || 'unknown'}`;
+    throw new Error(`API request failed (HTTP ${res.status}). ${detail}`);
+  }
+
   private notify() {
     for (const listener of this.listeners) {
       listener(this.currentUser);
@@ -168,7 +193,7 @@ class AuthClient {
         return null;
       }
 
-      const data = await res.json();
+      const data = await this.readResponse(res);
       if (data.user) {
         this.currentUser = data.user;
         localStorage.setItem(USER_KEY, JSON.stringify(data.user));
@@ -190,7 +215,7 @@ class AuthClient {
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Registration failed');
     }
@@ -210,7 +235,7 @@ class AuthClient {
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Login failed');
     }
@@ -250,7 +275,7 @@ class AuthClient {
       body: JSON.stringify({ code }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Email verification failed');
     }
@@ -276,7 +301,7 @@ class AuthClient {
       body: JSON.stringify({ code }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Phone verification failed');
     }
@@ -302,7 +327,7 @@ class AuthClient {
       body: JSON.stringify({ type }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to resend code');
     }
@@ -324,7 +349,7 @@ class AuthClient {
       body: JSON.stringify({ identifier }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Password reset request failed');
     }
@@ -345,7 +370,7 @@ class AuthClient {
       body: JSON.stringify({ identifier, code, newPassword, confirmPassword }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Password reset failed');
     }
@@ -370,7 +395,7 @@ class AuthClient {
       body: JSON.stringify(fields),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Profile update failed');
     }
@@ -390,7 +415,7 @@ class AuthClient {
       headers: this.getAuthHeaders(),
       credentials: 'include',
     });
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to load trade history');
     return Array.isArray(data.trades) ? data.trades : [];
   }
@@ -403,7 +428,7 @@ class AuthClient {
       credentials: 'include',
       body: JSON.stringify({ trade, mode }),
     });
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) throw new Error(data.error || 'Could not place trade');
     if (this.currentUser && data.balances) {
       this.currentUser = { ...this.currentUser, ...data.balances };
@@ -421,7 +446,7 @@ class AuthClient {
       credentials: 'include',
       body: JSON.stringify(trade),
     });
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) throw new Error(data.error || 'Could not settle trade');
     if (this.currentUser && data.balances) {
       this.currentUser = { ...this.currentUser, ...data.balances };
@@ -439,7 +464,7 @@ class AuthClient {
       credentials: 'include',
       body: JSON.stringify(trade),
     });
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) throw new Error(data.error || 'Failed to save trade');
   }
 
@@ -459,7 +484,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to fetch admin overview');
     }
@@ -474,7 +499,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to load user directory');
     }
@@ -493,7 +518,7 @@ class AuthClient {
       body: JSON.stringify({ role }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to update user role');
     }
@@ -524,7 +549,7 @@ class AuthClient {
       body: JSON.stringify({ accountType, amount, operation }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to adjust balance');
     }
@@ -555,7 +580,7 @@ class AuthClient {
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to create admin account');
     }
@@ -571,7 +596,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to delete user');
     }
