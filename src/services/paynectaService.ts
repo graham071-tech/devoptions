@@ -1,6 +1,4 @@
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
 
 export interface PaynectaConfig {
   baseUrl: string;
@@ -96,30 +94,15 @@ class PaynectaService {
   private discoveredTapFlowId: string | null = null;
 
   /**
-   * Securely saves the discovered TapFlow ID in memory, process.env, and .env configuration
+   * Cache a discovered TapFlow ID for this server instance.
+   * Serverless filesystems are ephemeral/read-only, so persist it in deployment
+   * environment configuration rather than attempting to write a local .env file.
    */
   public saveDiscoveredTapFlowId(flowId: string): void {
     const cleanId = String(flowId || '').trim();
     if (!cleanId) return;
     this.discoveredTapFlowId = cleanId;
-    if (typeof process !== 'undefined' && process.env) {
-      process.env.PAYNECTA_TAPFLOW_ID = cleanId;
-    }
-    try {
-      const envPath = path.resolve(process.cwd(), '.env');
-      if (fs.existsSync(envPath)) {
-        let envContent = fs.readFileSync(envPath, 'utf-8');
-        if (envContent.includes('PAYNECTA_TAPFLOW_ID=')) {
-          envContent = envContent.replace(/PAYNECTA_TAPFLOW_ID=.*/g, `PAYNECTA_TAPFLOW_ID=${cleanId}`);
-        } else {
-          envContent += `\nPAYNECTA_TAPFLOW_ID=${cleanId}\n`;
-        }
-        fs.writeFileSync(envPath, envContent, 'utf-8');
-        console.log(`[Paynecta Service] Successfully saved discovered TapFlow ID ${cleanId} into configuration.`);
-      }
-    } catch (err: any) {
-      console.warn('[Paynecta Service] Could not persist PAYNECTA_TAPFLOW_ID to .env file:', err.message);
-    }
+    process.env.PAYNECTA_TAPFLOW_ID = cleanId;
   }
 
   public getConfig(): PaynectaConfig {
@@ -223,7 +206,7 @@ class PaynectaService {
 
         if (res.ok) {
           const data = await res.json();
-          const accessToken = data.access_token || data.token || data.data?.access_token;
+          const accessToken = data.access_token || data.token || data.data?.access_token || data.data?.token;
           const expiresInSeconds = Number(data.expires_in || data.data?.expires_in) || 3600;
 
           if (accessToken) {
@@ -247,22 +230,17 @@ class PaynectaService {
           } else if (res.status === 403) {
             throw new Error(`Paynecta account authorization error (403): ${msg}. Please ensure your account has active API permissions.`);
           }
-          console.warn(`[Paynecta Service] /auth/token returned ${res.status}: ${msg}. Falling back to secret key.`);
+          console.warn(`[Paynecta Service] /auth/token returned ${res.status}: ${msg}. No direct-key fallback is permitted by Paynecta.`);
         }
       } catch (err: any) {
         if (err.message.includes('Paynecta authentication failed') || err.message.includes('Paynecta account authorization error')) {
           throw err;
         }
-        console.warn(`[Paynecta Service] /auth/token exchange error: ${err.message}. Falling back to secret key.`);
+        console.warn(`[Paynecta Service] /auth/token exchange error: ${err.message}.`);
       }
     }
 
-    // Direct API key authorization with secret key
-    if (config.secretKey) {
-      return config.secretKey;
-    }
-
-    throw new Error('No valid Paynecta credentials found.');
+    throw new Error('Paynecta access-token exchange failed. Check the public and secret keys and retry.');
   }
 
   /**
@@ -525,8 +503,11 @@ class PaynectaService {
 
     if (amount < config.minDepositKes) {
       throw new Error(
-        `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. USD $${config.minDepositUsd.toFixed(2)}).`
+        `Minimum deposit is KES ${config.minDepositKes.toLocaleString()} (approx. USD ${config.minDepositUsd.toFixed(2)}).`
       );
+    }
+    if (amount > 250000) {
+      throw new Error('The maximum single Paynecta M-Pesa payment is KES 250,000.');
     }
 
     // 2. Email Validation
@@ -543,6 +524,9 @@ class PaynectaService {
       (typeof process !== 'undefined' && (process.env.APP_BASE_URL || process.env.APP_URL)) ||
       'http://localhost:3000';
     const cleanAppUrl = rawAppUrl.replace(/\/+$/, '');
+    if (!cleanAppUrl.startsWith('https://')) {
+      throw new Error('Paynecta requires APP_URL to be an HTTPS address. Set APP_URL to your deployed Vercel domain.');
+    }
     const webhookUrl = `${cleanAppUrl}/api/paynecta/webhook`;
 
     // 4. Unique Merchant Reference
@@ -564,33 +548,18 @@ class PaynectaService {
     const resolvedTapFlowId = tapFlowResolution.tapFlowId;
 
     // 8. Assemble Request Body according to Paynecta API documentation
+    // Paynecta accepts a TapFlow, amount in KES cents, merchant reference,
+    // and HTTPS return URLs. The payer enters their own M-Pesa number on Paynecta.
     const requestBody: Record<string, any> = {
       tapflow: resolvedTapFlowId,
-      tapflow_id: resolvedTapFlowId,
       amount: amountSubunits,
-      currency: 'KES',
-      merchant_reference: merchantReference,
-      description: params.description || `DevOptions Deposit ${merchantReference}`,
-      webhook_url: webhookUrl,
-      callback_url: webhookUrl,
+      reference: merchantReference,
       redirect_url: redirectUrl,
       cancel_url: cancelUrl,
-      customer: {
-        email,
-        phone: params.phone?.trim() || '+254700000000',
-        name: params.name?.trim() || email.split('@')[0],
-      },
     };
 
-    if (params.metadata && Object.keys(params.metadata).length > 0) {
-      requestBody.metadata = params.metadata;
-    }
-
-    // 9. Call Paynecta Checkout API (POST /v1/checkout_sessions or /checkout/sessions)
-    const sessionEndpoints = [
-      `${config.baseUrl}/checkout_sessions`,
-      `${config.baseUrl}/checkout/sessions`,
-    ];
+    // 9. Call Paynecta's documented checkout-session endpoint.
+    const sessionEndpoints = [`${config.baseUrl}/checkout_sessions`];
 
     let lastError: any = null;
     let responseData: any = null;
@@ -606,10 +575,6 @@ class PaynectaService {
           },
           body: JSON.stringify(requestBody),
         });
-
-        if (res.status === 404 && endpoint === sessionEndpoints[0]) {
-          continue;
-        }
 
         if (!res.ok) {
           const errorText = await res.text();
@@ -751,10 +716,9 @@ class PaynectaService {
     try {
       const token = await this.getAccessToken();
 
-      // Look up via checkout_sessions / checkout/sessions
+      // Paynecta's documented checkout-session verification endpoint.
       const lookupUrls = [
         `${config.baseUrl}/checkout_sessions/${encodeURIComponent(sessionId)}`,
-        `${config.baseUrl}/checkout/sessions/${encodeURIComponent(sessionId)}`,
       ];
 
       let data: any = null;
@@ -773,20 +737,13 @@ class PaynectaService {
         if (res.ok) {
           data = await res.json();
           break;
-        } else if (res.status === 404 && url === lookupUrls[0]) {
-          continue;
         }
       }
 
       if (!data) {
-        if (lastStatus === 404) {
-          // Fallback lookup via transactions endpoint if available
-          return await this.verifyViaTransactionLookup(merchantReference, token, config.baseUrl);
-        }
-
         return {
           status: 'verification_delayed',
-          failureReason: `Paynecta service verification temporarily unreachable (${lastStatus}).`,
+          failureReason: `Paynecta checkout-session verification is temporarily unavailable (${lastStatus}).`,
         };
       }
 
@@ -796,48 +753,6 @@ class PaynectaService {
       return {
         status: 'verification_delayed',
         failureReason: `Network error verifying transaction with Paynecta: ${err.message}`,
-      };
-    }
-  }
-
-  private async verifyViaTransactionLookup(
-    merchantReference: string,
-    token: string,
-    baseUrl: string
-  ): Promise<PaynectaVerificationResult> {
-    try {
-      const txUrl = `${baseUrl}/transactions?merchant_reference=${encodeURIComponent(merchantReference)}`;
-      const res = await fetch(txUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-        },
-      });
-
-      if (!res.ok) {
-        return {
-          status: 'pending',
-          failureReason: 'Payment is awaiting settlement confirmation.',
-        };
-      }
-
-      const data = await res.json();
-      const transaction = Array.isArray(data)
-        ? data[0]
-        : data.data && Array.isArray(data.data)
-        ? data.data[0]
-        : data;
-
-      if (!transaction) {
-        return { status: 'pending' };
-      }
-
-      return this.mapPaynectaStatus(transaction);
-    } catch (err: any) {
-      return {
-        status: 'verification_delayed',
-        failureReason: err.message,
       };
     }
   }
@@ -876,7 +791,7 @@ class PaynectaService {
       (data.id != null ? String(data.id) : undefined);
 
     const receiptNumber =
-      (data.payment && typeof data.payment === 'object' && data.payment.receipt_number) ||
+      (data.payment && typeof data.payment === 'object' && (data.payment.receipt_number || data.payment.receipt)) ||
       data.receipt_number ||
       data.mpesa_receipt ||
       data.receipt;
@@ -951,56 +866,34 @@ class PaynectaService {
     }
 
     const { rawBody, signatureHeader, timestampHeader } = params;
-
-    if (!signatureHeader) {
-      return { isValid: false, reason: 'Missing Paynecta signature header.' };
+    if (!signatureHeader || !timestampHeader) {
+      return { isValid: false, reason: 'Missing Paynecta signature or timestamp header.' };
     }
 
-    // Replay attack prevention: validate timestamp tolerance (within 300s / 5 minutes)
-    if (timestampHeader) {
-      const ts = Number(timestampHeader);
-      if (!isNaN(ts) && ts > 0) {
-        const tsMs = ts > 10000000000 ? ts : ts * 1000;
-        const nowMs = Date.now();
-        const diffSeconds = Math.abs(nowMs - tsMs) / 1000;
-        if (diffSeconds > 300) {
-          return {
-            isValid: false,
-            reason: `Webhook timestamp expired. Difference of ${Math.round(diffSeconds)}s exceeds 300s tolerance limit.`,
-          };
-        }
-      }
+    const timestampSeconds = Number(timestampHeader);
+    if (!Number.isFinite(timestampSeconds) || timestampSeconds <= 0) {
+      return { isValid: false, reason: 'Invalid Paynecta timestamp header.' };
+    }
+    const ageSeconds = Math.abs(Date.now() / 1000 - timestampSeconds);
+    if (ageSeconds > 300) {
+      return { isValid: false, reason: 'Webhook timestamp is outside the 5-minute acceptance window.' };
     }
 
     try {
-      const sigClean = signatureHeader.replace(/^sha256=/, '').replace(/^v1=/, '').trim();
-      const receivedBuf = Buffer.from(sigClean, 'hex');
-
-      // Schema A: HMAC-SHA256 of `${timestampHeader}.${rawBody}`
-      if (timestampHeader) {
-        const hmacWithTs = crypto.createHmac('sha256', config.webhookSecret);
-        const computedWithTs = hmacWithTs.update(`${timestampHeader}.${rawBody}`).digest('hex');
-        const expectedBufWithTs = Buffer.from(computedWithTs, 'hex');
-        if (
-          expectedBufWithTs.length === receivedBuf.length &&
-          crypto.timingSafeEqual(expectedBufWithTs, receivedBuf)
-        ) {
-          return { isValid: true };
-        }
-      }
-
-      // Schema B: HMAC-SHA256 of rawBody
-      const hmacRaw = crypto.createHmac('sha256', config.webhookSecret);
-      const computedRaw = hmacRaw.update(rawBody).digest('hex');
-      const expectedBufRaw = Buffer.from(computedRaw, 'hex');
-
+      // Paynecta signs exactly: "<timestamp>.<raw request body>".
+      const expected = crypto
+        .createHmac('sha256', config.webhookSecret)
+        .update(`${timestampHeader}.${rawBody}`)
+        .digest('hex');
+      const received = signatureHeader.trim().toLowerCase();
+      const expectedBuffer = Buffer.from(expected, 'utf8');
+      const receivedBuffer = Buffer.from(received, 'utf8');
       if (
-        expectedBufRaw.length === receivedBuf.length &&
-        crypto.timingSafeEqual(expectedBufRaw, receivedBuf)
+        expectedBuffer.length === receivedBuffer.length &&
+        crypto.timingSafeEqual(expectedBuffer, receivedBuffer)
       ) {
         return { isValid: true };
       }
-
       return { isValid: false, reason: 'Webhook HMAC-SHA256 signature mismatch.' };
     } catch (err: any) {
       return { isValid: false, reason: `Signature verification exception: ${err.message}` };

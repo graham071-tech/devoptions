@@ -1,0 +1,46 @@
+name: One-time legacy database migration
+
+on:
+  push:
+    branches:
+      - fix/supabase-vercel-backend
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type MIGRATE to confirm importing legacy data into Supabase"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    if: ${{ (github.event_name == 'workflow_dispatch' && inputs.confirm == 'MIGRATE') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[migrate-legacy]')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out migration branch and full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch original main branch data
+        run: git fetch origin main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Import legacy records into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npx tsx scripts/migrate-legacy-data.ts
+
+# One-time migration approved by the repository owner on 2026-11-05.
+# Authentication fix: direct REST requests with apikey-only auth and credential preflight.
+# [migrate-legacy] Owner-approved migration run after replacing the Supabase secret key.

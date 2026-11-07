@@ -57,11 +57,37 @@ export interface RegisterPayload {
   phone: string;
   password: string;
   confirmPassword?: string;
+  fullName?: string;
+  name?: string;
 }
 
 export interface LoginPayload {
   identifier: string; // email or phone
   password: string;
+}
+
+export function normalizeUser(raw: any): AuthUser {
+  if (!raw) return raw;
+  const demoBalance = Number(
+    raw.demoBalance ?? raw.balances?.demo ?? (typeof raw.balances === 'object' ? raw.balances?.demo : undefined) ?? 10000
+  );
+  const realBalance = Number(
+    raw.realBalance ?? raw.balances?.real ?? (typeof raw.balances === 'object' ? raw.balances?.real : undefined) ?? 0
+  );
+  return {
+    id: raw.id || '',
+    email: raw.email || '',
+    phone: raw.phone || '',
+    role: raw.role === 'admin' ? 'admin' : (raw.role || 'user'),
+    emailVerified: Boolean(raw.emailVerified ?? raw.email_verified),
+    phoneVerified: Boolean(raw.phoneVerified ?? raw.phone_verified),
+    demoBalance: isNaN(demoBalance) ? 10000 : demoBalance,
+    realBalance: isNaN(realBalance) ? 0 : realBalance,
+    fullName: raw.fullName || raw.full_name || raw.name || '',
+    country: raw.country || 'International',
+    createdAt: Number(raw.createdAt || raw.created_at || raw.memberSince || Date.now()),
+    devNotice: raw.devNotice,
+  };
 }
 
 const TOKEN_KEY = 'devoptions_auth_token';
@@ -77,7 +103,7 @@ class AuthClient {
     const cachedUser = localStorage.getItem(USER_KEY);
     if (cachedUser) {
       try {
-        this.currentUser = JSON.parse(cachedUser);
+        this.currentUser = normalizeUser(JSON.parse(cachedUser));
       } catch (e) {
         this.currentUser = null;
       }
@@ -107,7 +133,7 @@ class AuthClient {
       const cached = localStorage.getItem(USER_KEY);
       if (cached) {
         try {
-          this.currentUser = JSON.parse(cached);
+          this.currentUser = normalizeUser(JSON.parse(cached));
         } catch {
           this.currentUser = null;
         }
@@ -127,6 +153,31 @@ class AuthClient {
     };
   }
 
+  private async readResponse(res: Response): Promise<any> {
+    const contentType = res.headers.get('content-type') || '';
+    const body = await res.text();
+
+    if (contentType.includes('application/json')) {
+      try {
+        return body ? JSON.parse(body) : {};
+      } catch {
+        throw new Error(`Server returned invalid JSON (HTTP ${res.status}). Please try again.`);
+      }
+    }
+
+    // Vercel and proxy errors are often HTML. Avoid exposing a raw JSON parse error.
+    const plainMessage = body
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 220);
+
+    const detail = plainMessage || `Unexpected response type: ${contentType || 'unknown'}`;
+    throw new Error(`API request failed (HTTP ${res.status}). ${detail}`);
+  }
+
   private notify() {
     for (const listener of this.listeners) {
       listener(this.currentUser);
@@ -134,10 +185,11 @@ class AuthClient {
   }
 
   private setSession(token: string, user: AuthUser) {
+    const normUser = normalizeUser(user);
     this.token = token;
-    this.currentUser = user;
+    this.currentUser = normUser;
     localStorage.setItem(TOKEN_KEY, token);
-    localStorage.setItem(USER_KEY, JSON.stringify(user));
+    localStorage.setItem(USER_KEY, JSON.stringify(normUser));
     this.notify();
   }
 
@@ -168,12 +220,13 @@ class AuthClient {
         return null;
       }
 
-      const data = await res.json();
+      const data = await this.readResponse(res);
       if (data.user) {
-        this.currentUser = data.user;
-        localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+        const normUser = normalizeUser(data.user);
+        this.currentUser = normUser;
+        localStorage.setItem(USER_KEY, JSON.stringify(normUser));
         this.notify();
-        return data.user;
+        return normUser;
       }
       return null;
     } catch (e) {
@@ -183,43 +236,66 @@ class AuthClient {
   }
 
   public async register(payload: RegisterPayload): Promise<{ user: AuthUser; message: string }> {
+    const rawEmail = payload.email.trim().toLowerCase();
+    const derivedName = (payload.fullName || payload.name || rawEmail.split('@')[0] || 'Trader').trim();
+    const reqBody = {
+      email: rawEmail,
+      phone: payload.phone.trim(),
+      password: payload.password,
+      confirmPassword: payload.confirmPassword || payload.password,
+      fullName: derivedName,
+      name: derivedName,
+    };
+
     const res = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(reqBody),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Registration failed');
+      const msg = data.error || data.message || (typeof data === 'string' ? data : 'Registration failed');
+      throw new Error(msg);
     }
 
-    if (data.token && data.user) {
-      this.setSession(data.token, data.user);
+    const normUser = normalizeUser(data.user);
+    if (data.token && normUser) {
+      this.setSession(data.token, normUser);
     }
 
-    return { user: data.user, message: data.message };
+    return { user: normUser, message: data.message || 'Account registered successfully.' };
   }
 
   public async login(payload: LoginPayload): Promise<{ user: AuthUser; message: string }> {
+    const rawId = payload.identifier.trim();
+    const reqBody = {
+      identifier: rawId,
+      email: rawId,
+      phone: rawId,
+      password: payload.password,
+    };
+
     const res = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(payload),
+      body: JSON.stringify(reqBody),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Login failed');
+      const msg = data.error || data.message || (typeof data === 'string' ? data : 'Login failed');
+      throw new Error(msg);
     }
 
-    if (data.token && data.user) {
-      this.setSession(data.token, data.user);
+    const normUser = normalizeUser(data.user);
+    if (data.token && normUser) {
+      this.setSession(data.token, normUser);
     }
 
-    return { user: data.user, message: data.message };
+    return { user: normUser, message: data.message || 'Logged in successfully.' };
   }
 
   public async logout(): Promise<void> {
@@ -250,16 +326,17 @@ class AuthClient {
       body: JSON.stringify({ code }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Email verification failed');
+      throw new Error(data.error || data.message || 'Email verification failed');
     }
 
     if (data.user) {
-      this.currentUser = data.user;
-      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      const normUser = normalizeUser(data.user);
+      this.currentUser = normUser;
+      localStorage.setItem(USER_KEY, JSON.stringify(normUser));
       this.notify();
-      return data.user;
+      return normUser;
     }
     throw new Error('Verification response did not contain user data');
   }
@@ -276,16 +353,17 @@ class AuthClient {
       body: JSON.stringify({ code }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Phone verification failed');
+      throw new Error(data.error || data.message || 'Phone verification failed');
     }
 
     if (data.user) {
-      this.currentUser = data.user;
-      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      const normUser = normalizeUser(data.user);
+      this.currentUser = normUser;
+      localStorage.setItem(USER_KEY, JSON.stringify(normUser));
       this.notify();
-      return data.user;
+      return normUser;
     }
     throw new Error('Verification response did not contain user data');
   }
@@ -302,31 +380,34 @@ class AuthClient {
       body: JSON.stringify({ type }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Failed to resend code');
+      throw new Error(data.error || data.message || 'Failed to resend code');
     }
 
     if (data.user) {
-      this.currentUser = data.user;
-      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      const normUser = normalizeUser(data.user);
+      this.currentUser = normUser;
+      localStorage.setItem(USER_KEY, JSON.stringify(normUser));
       this.notify();
+      return { message: data.message, user: normUser };
     }
 
-    return { message: data.message, user: data.user };
+    return { message: data.message, user: this.currentUser || undefined };
   }
 
   public async forgotPassword(identifier: string): Promise<{ message: string; devOtp?: string }> {
+    const rawId = identifier.trim();
     const res = await fetch('/api/auth/forgot-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ identifier }),
+      body: JSON.stringify({ identifier: rawId, email: rawId, phone: rawId }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Password reset request failed');
+      throw new Error(data.error || data.message || 'Password reset request failed');
     }
 
     return { message: data.message, devOtp: data.devOtp };
@@ -338,16 +419,24 @@ class AuthClient {
     newPassword: string,
     confirmPassword?: string
   ): Promise<{ message: string }> {
+    const rawId = identifier.trim();
     const res = await fetch('/api/auth/reset-password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ identifier, code, newPassword, confirmPassword }),
+      body: JSON.stringify({
+        identifier: rawId,
+        email: rawId,
+        phone: rawId,
+        code,
+        newPassword,
+        confirmPassword,
+      }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Password reset failed');
+      throw new Error(data.error || data.message || 'Password reset failed');
     }
 
     return { message: data.message };
@@ -370,18 +459,78 @@ class AuthClient {
       body: JSON.stringify(fields),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
-      throw new Error(data.error || 'Profile update failed');
+      throw new Error(data.error || data.message || 'Profile update failed');
     }
 
     if (data.user) {
-      this.currentUser = data.user;
-      localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+      const normUser = normalizeUser(data.user);
+      this.currentUser = normUser;
+      localStorage.setItem(USER_KEY, JSON.stringify(normUser));
       this.notify();
-      return data.user;
+      return normUser;
     }
     throw new Error('Profile update did not return user');
+  }
+
+  public async getTrades(): Promise<any[]> {
+    if (!this.getToken()) return [];
+    const res = await fetch('/api/user/trades', {
+      headers: this.getAuthHeaders(),
+      credentials: 'include',
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to load trade history');
+    return Array.isArray(data.trades) ? data.trades : [];
+  }
+
+  public async placeTrade(trade: any, mode: 'demo' | 'real'): Promise<{ demoBalance: number; realBalance: number }> {
+    if (!this.getToken()) throw new Error('Authentication required');
+    const res = await fetch('/api/user/trades/place', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify({ trade, mode }),
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Could not place trade');
+    if (this.currentUser && data.balances) {
+      this.currentUser = { ...this.currentUser, ...data.balances };
+      localStorage.setItem(USER_KEY, JSON.stringify(this.currentUser));
+      this.notify();
+    }
+    return data.balances;
+  }
+
+  public async settleTrade(trade: any): Promise<{ demoBalance: number; realBalance: number }> {
+    if (!this.getToken()) throw new Error('Authentication required');
+    const res = await fetch(`/api/user/trades/${encodeURIComponent(trade.id)}/settle`, {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(trade),
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Could not settle trade');
+    if (this.currentUser && data.balances) {
+      this.currentUser = { ...this.currentUser, ...data.balances };
+      localStorage.setItem(USER_KEY, JSON.stringify(this.currentUser));
+      this.notify();
+    }
+    return data.balances;
+  }
+
+  public async saveTrade(trade: any): Promise<void> {
+    if (!this.getToken()) return;
+    const res = await fetch('/api/user/trades', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(trade),
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Failed to save trade');
   }
 
   public isAdmin(): boolean {
@@ -400,7 +549,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to fetch admin overview');
     }
@@ -415,7 +564,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to load user directory');
     }
@@ -434,7 +583,7 @@ class AuthClient {
       body: JSON.stringify({ role }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to update user role');
     }
@@ -465,7 +614,7 @@ class AuthClient {
       body: JSON.stringify({ accountType, amount, operation }),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to adjust balance');
     }
@@ -496,7 +645,7 @@ class AuthClient {
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to create admin account');
     }
@@ -512,7 +661,7 @@ class AuthClient {
       credentials: 'include',
     });
 
-    const data = await res.json();
+    const data = await this.readResponse(res);
     if (!res.ok) {
       throw new Error(data.error || 'Failed to delete user');
     }

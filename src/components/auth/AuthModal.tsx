@@ -17,6 +17,7 @@ import {
   KeyRound,
   ShieldAlert,
   Crown,
+  User,
 } from 'lucide-react';
 
 export type AuthMode = 'login' | 'register' | 'verify' | 'forgot' | 'reset';
@@ -42,6 +43,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [successMessage, setSuccessMessage] = useState<string>('');
 
   // Form fields
+  const [fullName, setFullName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [phone, setPhone] = useState<string>('+');
   const [password, setPassword] = useState<string>('');
@@ -133,7 +135,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
     setLoading(true);
     try {
+      const derivedName = (fullName.trim() || email.trim().split('@')[0] || 'Trader');
       const res = await authClient.register({
+        fullName: derivedName,
         email: email.trim().toLowerCase(),
         phone: formattedPhone,
         password,
@@ -352,6 +356,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           ───────────────────────────────────────────────────────────── */}
           {mode === 'register' && (
             <form onSubmit={handleRegister} className="space-y-3.5">
+              {/* Full Name */}
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold text-slate-400 uppercase font-mono flex items-center justify-between">
+                  <span>Full Name</span>
+                  <span className="text-slate-500 lowercase">e.g. Alex Morgan</span>
+                </label>
+                <div className="relative">
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                  <input
+                    type="text"
+                    required
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Alex Morgan"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-3 py-2 text-slate-100 text-xs focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
               {/* Email */}
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold text-slate-400 uppercase font-mono flex items-center justify-between">
