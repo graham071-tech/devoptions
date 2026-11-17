@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { analyzeLastDigits, extractLastDigit } from '../../utils/indicators';
+import { storage } from '../../services/storage';
 import { Activity, Flame, Snowflake, Info, AlertCircle } from 'lucide-react';
 
 interface LiveDigitBarProps {
@@ -17,7 +18,7 @@ export const LiveDigitBar: React.FC<LiveDigitBarProps> = ({
   symbolName,
   isLive = true,
 }) => {
-  const [sampleWindow, setSampleWindow] = useState<number>(50);
+  const [sampleWindow, setSampleWindow] = useState<number>(() => storage.getDigitSampleWindow());
 
   // Safely extract latest digit using documented precision
   const latestDigit = useMemo(() => {
@@ -64,7 +65,10 @@ export const LiveDigitBar: React.FC<LiveDigitBarProps> = ({
             {[25, 50, 100].map((sz) => (
               <button
                 key={sz}
-                onClick={() => setSampleWindow(sz)}
+                onClick={() => {
+                  setSampleWindow(sz);
+                  storage.saveDigitSampleWindow(sz);
+                }}
                 className={`px-2 py-0.5 rounded transition-colors cursor-pointer ${
                   sampleWindow === sz
                     ? 'bg-slate-800 text-cyan-300 font-bold border border-slate-700'
@@ -167,12 +171,6 @@ export const LiveDigitBar: React.FC<LiveDigitBarProps> = ({
             <span className="text-slate-600">/</span>
             <span className="text-amber-400 font-bold">&ge;5 ({stats.overFourPercent}%)</span>
           </div>
-        </div>
-
-        {/* Descriptive information note */}
-        <div className="text-[9px] text-slate-500 text-center sm:text-right flex items-center gap-1">
-          <Info className="w-2.5 h-2.5 shrink-0" />
-          <span>Descriptive past sample data, not a prediction of future outcomes.</span>
         </div>
       </div>
     </div>

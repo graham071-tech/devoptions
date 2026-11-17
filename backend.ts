@@ -9,8 +9,11 @@ import {
   shouldUseLocalFallback,
 } from './src/services/supabaseService';
 import { localFallbackStore } from './server/localFallbackStore';
+import { marketEngine } from './server/marketEngine';
+import { adminRiskStore, isProtectedAdminUser } from './server/adminRiskStore';
 
 dotenv.config();
+marketEngine.startLoop();
 
 const app = express();
 export { app };
@@ -48,7 +51,7 @@ if (process.env.NODE_ENV !== 'production') {
 app.use((req: Request, _res: Response, next: NextFunction) => {
   if (req.url.startsWith('/api/index')) {
     req.url = req.url.replace(/^\/api\/index/, '/api') || '/api';
-  } else if (!req.url.startsWith('/api') && !req.url.startsWith('/?')) {
+  } else if (process.env.VERCEL && !req.url.startsWith('/api') && !req.url.startsWith('/?')) {
     req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
   }
   next();
@@ -1133,17 +1136,75 @@ app.put('/api/user/profile', requireAuth, async (req: AuthenticatedRequest, res:
   }
 });
 
+// 10.5 PROTECTED ADMIN RISK MANAGEMENT ROUTES (exclusively for francisgraham admin account)
+app.get('/api/user/risk-protection', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const riskState = await adminRiskStore.getRiskState(req.user!);
+    return res.json({ protected: Boolean(riskState), riskState });
+  } catch (error) {
+    console.error('[Risk Protection Read Error]:', error);
+    return res.status(500).json({ error: 'Could not load risk protection state.' });
+  }
+});
+
+app.post('/api/user/risk-protection/start', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isProtectedAdminUser(req.user)) {
+      return res.json({ protected: false, riskState: null });
+    }
+    const maxLoss = Number(req.body?.maxLoss ?? 15);
+    const mode = req.body?.mode === 'real' ? 'real' : 'demo';
+    if (!Number.isFinite(maxLoss) || maxLoss <= 0 || maxLoss > 1000000) {
+      return res.status(400).json({ error: 'Please specify a valid positive Maximum Loss limit.' });
+    }
+    const riskState = await adminRiskStore.startManualBotSession(req.user!, { maxLoss, mode });
+    return res.json({ protected: true, riskState });
+  } catch (error) {
+    console.error('[Risk Protection Start Error]:', error);
+    return res.status(500).json({ error: 'Could not start risk-protected session.' });
+  }
+});
+
+app.post('/api/user/risk-protection/stop', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const riskState = await adminRiskStore.stopBotSession(req.user!);
+    return res.json({ protected: Boolean(riskState), riskState });
+  } catch (error) {
+    console.error('[Risk Protection Stop Error]:', error);
+    return res.status(500).json({ error: 'Could not update bot session status.' });
+  }
+});
+
+app.post('/api/user/risk-protection/config', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isProtectedAdminUser(req.user)) {
+      return res.json({ protected: false, riskState: null });
+    }
+    const mode = req.body?.mode === 'real' ? 'real' : req.body?.mode === 'demo' ? 'demo' : undefined;
+    const rawMaxLoss = req.body?.maxLoss;
+    const maxLoss =
+      rawMaxLoss !== undefined && Number.isFinite(Number(rawMaxLoss)) && Number(rawMaxLoss) > 0
+        ? Number(rawMaxLoss)
+        : undefined;
+    const riskState = await adminRiskStore.syncConfig(req.user!, { mode, maxLoss });
+    return res.json({ protected: true, riskState });
+  } catch (error) {
+    console.error('[Risk Protection Config Error]:', error);
+    return res.status(500).json({ error: 'Could not update risk configuration.' });
+  }
+});
+
 // 11. USER TRADES
 app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const trades = await withStoreFallback(
       async () => {
         const { data, error } = await getSupabaseClient().from('trades').select('trade_data')
-          .eq('user_id', req.user!.id).order('recorded_at', { ascending: false }).limit(50);
+          .eq('user_id', req.user!.id).order('recorded_at', { ascending: false }).limit(100);
         if (error) throw error;
         return (data || []).map((row: any) => row.trade_data);
       },
-      () => localFallbackStore.listTradesByUser(req.user!.id, 50)
+      () => localFallbackStore.listTradesByUser(req.user!.id, 100)
     );
     return res.json({ trades });
   } catch (error) {
@@ -1151,10 +1212,9 @@ app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: 
     return res.status(500).json({ error: 'Could not load trade history.' });
   }
 });
-app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(120, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { trade, mode } = req.body || {};
-    if (mode === 'real') return res.status(503).json({ error: 'Real-balance simulation is paused until trade outcomes can be verified by the server.' });
     if (!trade || typeof trade !== 'object' || Array.isArray(trade)
       || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128
       || !['demo', 'real'].includes(mode) || trade.mode !== mode
@@ -1167,56 +1227,107 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), 
       || trade.durationTicks < 1 || trade.durationTicks > 10000) {
       return res.status(400).json({ error: 'Invalid simulated trade details.' });
     }
-    const result = await withStoreFallback(
-      async () => {
-        const { data, error } = await getSupabaseClient().rpc('place_simulated_trade', {
-          p_user_id: req.user!.id,
-          p_trade: trade,
-          p_mode: mode,
-          p_stake: trade.stake,
-        });
-        if (error) {
-          if (isSupabaseTransportError(error)) throw error;
-          if (/Insufficient balance/i.test(error.message)) return { status: 409 as const, error: 'Insufficient balance.' };
-          if (/already exists/i.test(error.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
-          throw error;
-        }
-        const { data: userRow, error: userError } = await getSupabaseClient()
-          .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
-        if (userError) throw userError;
+
+    const executePlacement = async () => {
+      const gate = await adminRiskStore.validateAndReserveTradeLocked(req.user!, trade, mode);
+      if (!gate.allowed) {
         return {
-          status: 201 as const,
-          balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
-          wallet: data,
+          status: gate.status,
+          body: { error: gate.error, code: gate.code, riskState: gate.riskState },
         };
-      },
-      () => {
-        try {
-          const wallet = localFallbackStore.placeSimulatedTrade(req.user!.id, trade, mode, trade.stake);
-          const u = localFallbackStore.findUserById(req.user!.id)!;
-          return {
-            status: 201 as const,
-            balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
-            wallet,
-          };
-        } catch (err: any) {
-          if (/Insufficient balance/i.test(err.message)) return { status: 409 as const, error: 'Insufficient balance.' };
-          if (/already exists/i.test(err.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
-          throw err;
-        }
       }
-    );
-    if (result.status !== 201) {
-      return res.status(result.status).json({ error: result.error });
-    }
-    return res.status(201).json({ success: true, trade, balances: result.balances, wallet: result.wallet });
+
+      if (mode === 'real') {
+        const releasedState = await adminRiskStore.releaseReservedTradeLocked(req.user!, trade.id);
+        return {
+          status: 503,
+          body: {
+            error: 'Real-balance simulation is paused until trade outcomes can be verified by the server.',
+            ...(releasedState ? { riskState: releasedState } : {}),
+          },
+        };
+      }
+
+      try {
+        const result = await withStoreFallback(
+          async () => {
+            const { data, error } = await getSupabaseClient().rpc('place_simulated_trade', {
+              p_user_id: req.user!.id,
+              p_trade: trade,
+              p_mode: mode,
+              p_stake: trade.stake,
+            });
+            if (error) {
+              if (isSupabaseTransportError(error)) throw error;
+              if (/Insufficient balance/i.test(error.message)) return { status: 409 as const, error: 'Insufficient balance.' };
+              if (/already exists/i.test(error.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
+              throw error;
+            }
+            const { data: userRow, error: userError } = await getSupabaseClient()
+              .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+            if (userError) throw userError;
+            return {
+              status: 201 as const,
+              balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
+              wallet: data,
+            };
+          },
+          () => {
+            try {
+              const wallet = localFallbackStore.placeSimulatedTrade(req.user!.id, trade, mode, trade.stake);
+              const u = localFallbackStore.findUserById(req.user!.id)!;
+              return {
+                status: 201 as const,
+                balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
+                wallet,
+              };
+            } catch (err: any) {
+              if (/Insufficient balance/i.test(err.message)) return { status: 409 as const, error: 'Insufficient balance.' };
+              if (/already exists/i.test(err.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
+              throw err;
+            }
+          }
+        );
+
+        if (result.status !== 201) {
+          const releasedState = await adminRiskStore.releaseReservedTradeLocked(req.user!, trade.id);
+          return {
+            status: result.status,
+            body: {
+              error: result.error,
+              ...(releasedState ? { riskState: releasedState } : {}),
+            },
+          };
+        }
+
+        return {
+          status: 201,
+          body: {
+            success: true,
+            trade,
+            balances: result.balances,
+            wallet: result.wallet,
+            ...(gate.riskState ? { riskState: gate.riskState } : {}),
+          },
+        };
+      } catch (err) {
+        await adminRiskStore.releaseReservedTradeLocked(req.user!, trade.id);
+        throw err;
+      }
+    };
+
+    const outcome = isProtectedAdminUser(req.user)
+      ? await adminRiskStore.withUserLock(req.user!.id, executePlacement)
+      : await executePlacement();
+
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('[Simulated Trade Placement Error]:', error);
     return res.status(500).json({ error: 'Could not place simulated trade.' });
   }
 });
 
-app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(60, 60000), async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(120, 60000), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const tradeId = String(req.params.tradeId || '');
     const settlement = req.body;
@@ -1228,48 +1339,79 @@ app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(60
       || !Array.isArray(settlement.ticksRecorded) || settlement.ticksRecorded.length > 10000) {
       return res.status(400).json({ error: 'Invalid simulated settlement details.' });
     }
-    const result = await withStoreFallback(
-      async () => {
-        const { data, error } = await getSupabaseClient().rpc('settle_simulated_trade', {
-          p_user_id: req.user!.id,
-          p_trade_id: tradeId,
-          p_settlement: settlement,
-        });
-        if (error) {
-          if (isSupabaseTransportError(error)) throw error;
-          if (/not found/i.test(error.message)) return { status: 404 as const, error: 'Trade not found.' };
-          if (/already settled/i.test(error.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
-          throw error;
-        }
-        const { data: userRow, error: userError } = await getSupabaseClient()
-          .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
-        if (userError) throw userError;
-        return {
-          status: 200 as const,
-          balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
-          wallet: data,
-        };
-      },
-      () => {
-        try {
-          const wallet = localFallbackStore.settleSimulatedTrade(req.user!.id, tradeId, settlement);
-          const u = localFallbackStore.findUserById(req.user!.id)!;
+
+    const executeSettlement = async () => {
+      const result = await withStoreFallback(
+        async () => {
+          const { data, error } = await getSupabaseClient().rpc('settle_simulated_trade', {
+            p_user_id: req.user!.id,
+            p_trade_id: tradeId,
+            p_settlement: settlement,
+          });
+          if (error) {
+            if (isSupabaseTransportError(error)) throw error;
+            if (/not found/i.test(error.message)) return { status: 404 as const, error: 'Trade not found.' };
+            if (/already settled/i.test(error.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
+            throw error;
+          }
+          const { data: userRow, error: userError } = await getSupabaseClient()
+            .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+          if (userError) throw userError;
           return {
             status: 200 as const,
-            balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
-            wallet,
+            balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
+            wallet: data,
           };
-        } catch (err: any) {
-          if (/not found/i.test(err.message)) return { status: 404 as const, error: 'Trade not found.' };
-          if (/already settled/i.test(err.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
-          throw err;
+        },
+        () => {
+          try {
+            const wallet = localFallbackStore.settleSimulatedTrade(req.user!.id, tradeId, settlement);
+            const u = localFallbackStore.findUserById(req.user!.id)!;
+            return {
+              status: 200 as const,
+              balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
+              wallet,
+            };
+          } catch (err: any) {
+            if (/not found/i.test(err.message)) return { status: 404 as const, error: 'Trade not found.' };
+            if (/already settled/i.test(err.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
+            throw err;
+          }
         }
+      );
+
+      if (result.status !== 200) {
+        return { status: result.status, body: { error: result.error } };
       }
-    );
-    if (result.status !== 200) {
-      return res.status(result.status).json({ error: result.error });
-    }
-    return res.json({ success: true, balances: result.balances, wallet: result.wallet });
+
+      const safeLossAmount =
+        settlement.status === 'lost'
+          ? settlement.profitLoss < 0
+            ? Number(settlement.profitLoss)
+            : -Math.abs(Number(settlement.stake || 0))
+          : Number(settlement.profitLoss);
+
+      const riskState = await adminRiskStore.recordTradeSettlementLocked(req.user!, tradeId, {
+        status: settlement.status,
+        profitLoss: safeLossAmount,
+      });
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          balances: result.balances,
+          wallet: result.wallet,
+          ...(riskState ? { riskState } : {}),
+        },
+      };
+    };
+
+    const outcome = isProtectedAdminUser(req.user)
+      ? await adminRiskStore.withUserLock(req.user!.id, executeSettlement)
+      : await executeSettlement();
+
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error('[Simulated Trade Settlement Error]:', error);
     return res.status(500).json({ error: 'Could not settle simulated trade.' });
@@ -2426,7 +2568,87 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
   }
 });
 
-// 12. HEALTH CHECK
+// 12. PERSISTENT SIMULATED MARKET ENGINE ENDPOINTS
+app.get('/api/market/snapshot', async (req: Request, res: Response) => {
+  try {
+    await marketEngine.ensureUpToDate();
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';
+    const atEpochRaw = Number(req.query.atEpoch);
+
+    if (symbol) {
+      const snapshot = marketEngine.getInstrumentSnapshot(symbol);
+      if (!snapshot) {
+        return res.status(404).json({ error: `Unknown market instrument: ${symbol}` });
+      }
+      const tickAtTarget =
+        Number.isFinite(atEpochRaw) && atEpochRaw > 0
+          ? marketEngine.getPriceAtOrAfter(symbol, atEpochRaw)
+          : null;
+
+      return res.json({
+        symbol: snapshot.symbol,
+        currentQuote: snapshot.lastQuote,
+        direction: snapshot.direction,
+        lastDigit: snapshot.lastDigit,
+        lastTickEpoch: snapshot.lastTickEpoch,
+        serverTime: Date.now(),
+        ticks: snapshot.ticks,
+        candles: snapshot.candles,
+        tickAtTarget,
+      });
+    }
+
+    const markets = marketEngine.getAllLatestTicks();
+    return res.json({
+      serverTime: Date.now(),
+      markets,
+    });
+  } catch (error) {
+    console.error('[Market Snapshot Error]:', error);
+    return res.status(500).json({ error: 'Could not read market state.' });
+  }
+});
+
+app.get('/api/market/stream', async (req: Request, res: Response) => {
+  await marketEngine.ensureUpToDate();
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  req.socket?.setTimeout?.(0);
+  res.flushHeaders?.();
+
+  const initialFrame = {
+    serverTime: Date.now(),
+    ticks: marketEngine.getAllLatestTicks(),
+  };
+  res.write(`event: init\ndata: ${JSON.stringify(initialFrame)}\n\n`);
+
+  const unsub = marketEngine.subscribe((frame) => {
+    try {
+      res.write(`event: tick\ndata: ${JSON.stringify(frame)}\n\n`);
+    } catch {
+      unsub();
+    }
+  });
+
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(keepAlive);
+      unsub();
+    }
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    unsub();
+  });
+});
+
+// 13. HEALTH CHECK
 app.get(['/api/health', '/api', '/health'], (req: Request, res: Response) => {
   return res.json({ status: 'ok', service: 'DevOptions Backend', timestamp: Date.now() });
 });

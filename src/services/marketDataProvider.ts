@@ -1,18 +1,20 @@
 /**
- * Provider-Independent Market Data Service for DevOptions
- * Supports:
- * 1. Default Simulated Demo Market Feed (Zero broker dependency, realistic mathematical volatility model)
- * 2. Custom Webhook / WebSocket Market Data Gateway (Configurable by website owner)
- *
- * Separates market data telemetry from financial trade execution.
+ * Continuous, Server-Synchronized Market Data Client for DevOptions
+ * - Connects to the authoritative backend simulation engine via SSE (/api/market/stream)
+ *   and REST snapshots (/api/market/snapshot) so every browser tab & page refresh shares
+ *   identical, continuous simulated prices, chart histories, and candle data per instrument.
+ * - Preserves an isolated 220ms bot-only micro-stream (subscribeToBotTicks) that never
+ *   accelerates digit circles or manual trading timing.
  */
 
 import { Candle, Market, Tick } from '../types/trading';
 import { extractLastDigit } from '../utils/indicators';
 import { SYNTHETIC_MARKETS } from '../data/syntheticMarkets';
+import { storage } from './storage';
 
 type TickCallback = (tick: Tick) => void;
 type CandlesCallback = (candles: Candle[]) => void;
+type HistoryCallback = (symbol: string, ticks: Tick[]) => void;
 type ConnectionStateCallback = (connected: boolean, source: 'live' | 'demo', latencyMs: number) => void;
 
 export interface MarketProviderConfig {
@@ -22,30 +24,67 @@ export interface MarketProviderConfig {
   reconnectIntervalMs: number;
 }
 
+export interface MarketSnapshotResponse {
+  symbol: string;
+  currentQuote: number;
+  direction: 'up' | 'down' | 'flat';
+  lastDigit: number;
+  lastTickEpoch: number;
+  serverTime: number;
+  ticks: Tick[];
+  candles: Candle[];
+  tickAtTarget?: Tick | null;
+}
+
+interface SymbolCache {
+  ticks: Tick[];
+  candles: Candle[];
+  lastQuote: number;
+}
+
+const MAX_CLIENT_TICKS = 240;
+
 class MarketDataProviderService {
-  private currentMarket: Market = SYNTHETIC_MARKETS[0];
-  private currentSymbol: string = 'R_100';
+  private currentMarket: Market;
+  private currentSymbol: string;
   private config: MarketProviderConfig = {
     providerType: 'demo',
-    reconnectIntervalMs: 5000,
+    reconnectIntervalMs: 3000,
   };
 
   private ws: WebSocket | null = null;
-  private simulationInterval: any = null;
+  private eventSource: EventSource | null = null;
+  private fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+  private fallbackSimInterval: ReturnType<typeof setInterval> | null = null;
   private isConnected: boolean = true;
-  private latencyMs: number = 18;
+  private latencyMs: number = 14;
   private dataSource: 'live' | 'demo' = 'demo';
+  private started = false;
 
   private tickListeners: Set<TickCallback> = new Set();
+  private botTickListeners: Set<TickCallback> = new Set();
   private candleListeners: Set<CandlesCallback> = new Set();
+  private historyListeners: Set<HistoryCallback> = new Set();
   private connectionListeners: Set<ConnectionStateCallback> = new Set();
 
+  private symbolCache: Map<string, SymbolCache> = new Map();
   private lastQuote: number = 6124.5;
-  private lastCandles: Candle[] = [];
 
   constructor() {
-    this.seedInitialHistory();
-    this.startSimulation();
+    const savedSymbol = typeof window !== 'undefined' ? storage.getSelectedMarketSymbol() : 'R_100';
+    const initialMarket =
+      SYNTHETIC_MARKETS.find((m) => m.symbol === savedSymbol) || SYNTHETIC_MARKETS[0];
+    this.currentMarket = initialMarket;
+    this.currentSymbol = initialMarket.symbol;
+
+    if (typeof window !== 'undefined') {
+      this.connectServerStream();
+      void this.syncMarketSnapshot(this.currentSymbol);
+    } else {
+      // Non-browser environment (e.g. direct Node unit tests)
+      this.seedOfflineHistory(this.currentMarket);
+      this.startOfflineFallback();
+    }
   }
 
   public getProviderConfig(): MarketProviderConfig {
@@ -59,7 +98,11 @@ class MarketDataProviderService {
     } else {
       this.disconnectWs();
       this.dataSource = 'demo';
-      this.startSimulation();
+      if (typeof window !== 'undefined') {
+        this.connectServerStream();
+      } else {
+        this.startOfflineFallback();
+      }
       this.notifyConnectionState();
     }
   }
@@ -69,25 +112,79 @@ class MarketDataProviderService {
     this.currentMarket = market;
     this.currentSymbol = market.symbol;
 
-    if (symbolChanged) {
-      this.seedInitialHistory();
+    if (typeof window !== 'undefined') {
+      storage.saveSelectedMarketSymbol(market.symbol);
+    }
+
+    const cached = this.symbolCache.get(market.symbol);
+    if (cached && cached.ticks.length > 0) {
+      this.lastQuote = cached.lastQuote;
+    }
+
+    if (symbolChanged || !cached || cached.ticks.length === 0) {
       if (this.dataSource === 'live' && this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({ subscribe_ticks: this.currentSymbol }));
+      } else if (typeof window !== 'undefined') {
+        void this.syncMarketSnapshot(market.symbol);
+      } else {
+        this.seedOfflineHistory(market);
       }
     }
   }
 
   public getCurrentQuote(): number {
+    const cached = this.symbolCache.get(this.currentSymbol);
+    if (cached && Number.isFinite(cached.lastQuote) && cached.lastQuote > 0) {
+      return cached.lastQuote;
+    }
     return this.lastQuote;
   }
 
   public getCandles(): Candle[] {
-    return [...this.lastCandles];
+    const cached = this.symbolCache.get(this.currentSymbol);
+    return cached ? [...cached.candles] : [];
+  }
+
+  public getPriceHistory(count = 120): { time: number; price: number }[] {
+    const cached = this.symbolCache.get(this.currentSymbol);
+    if (!cached || cached.ticks.length === 0) return [];
+    return cached.ticks.slice(-count).map((t) => ({ time: t.epoch, price: t.quote }));
+  }
+
+  public getTickHistory(symbol = this.currentSymbol, count = 200): Tick[] {
+    const cached = this.symbolCache.get(symbol);
+    if (!cached) return [];
+    return cached.ticks.slice(-count);
+  }
+
+  public isFeedHealthy(): boolean {
+    return this.isConnected && Number.isFinite(this.getCurrentQuote()) && this.getCurrentQuote() > 0;
   }
 
   public subscribeToTicks(cb: TickCallback): () => void {
     this.tickListeners.add(cb);
+    if (typeof window !== 'undefined' && !this.started) {
+      this.connectServerStream();
+    }
     return () => this.tickListeners.delete(cb);
+  }
+
+  public subscribeToHistory(cb: HistoryCallback): () => void {
+    this.historyListeners.add(cb);
+    return () => this.historyListeners.delete(cb);
+  }
+
+  /**
+   * Realistic 1-second bot stream aligned with the continuous server market ticks.
+   */
+  public subscribeToBotTicks(cb: TickCallback): () => void {
+    this.botTickListeners.add(cb);
+    if (typeof window !== 'undefined' && !this.started) {
+      this.connectServerStream();
+    }
+    return () => {
+      this.botTickListeners.delete(cb);
+    };
   }
 
   public subscribeToCandles(cb: CandlesCallback): () => void {
@@ -104,23 +201,23 @@ class MarketDataProviderService {
   public reconnect() {
     if (this.config.providerType === 'custom_ws' && this.config.customWsUrl) {
       this.connectCustomWs(this.config.customWsUrl);
+    } else if (typeof window !== 'undefined') {
+      this.connectServerStream(true);
+      void this.syncMarketSnapshot(this.currentSymbol);
     } else {
-      this.startSimulation();
+      this.startOfflineFallback();
     }
   }
 
   public disconnect() {
     this.disconnectWs();
-    if (this.simulationInterval) {
-      clearInterval(this.simulationInterval);
-      this.simulationInterval = null;
-    }
+    this.disconnectServerStream();
+    this.stopOfflineFallback();
     this.isConnected = false;
     this.notifyConnectionState();
   }
 
-  // Compatibility helper for legacy code
-  public connect(appId?: string, token?: string) {
+  public connect(_appId?: string, token?: string) {
     if (token && this.config.customWsUrl) {
       this.configureProvider({ providerType: 'custom_ws' });
     } else {
@@ -128,15 +225,209 @@ class MarketDataProviderService {
     }
   }
 
+  public async fetchMarketSnapshot(
+    symbol: string,
+    atEpoch?: number
+  ): Promise<MarketSnapshotResponse | null> {
+    if (typeof fetch === 'undefined') return null;
+    try {
+      const qs = new URLSearchParams({ symbol });
+      if (atEpoch && Number.isFinite(atEpoch)) {
+        qs.set('atEpoch', String(Math.floor(atEpoch)));
+      }
+      const startedAt = Date.now();
+      const res = await fetch(`/api/market/snapshot?${qs.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as MarketSnapshotResponse;
+      this.latencyMs = Math.max(4, Date.now() - startedAt);
+      if (data && Array.isArray(data.ticks) && data.ticks.length > 0) {
+        this.mergeSymbolSnapshot(data.symbol, data.ticks, data.candles || []);
+      }
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  public async syncMarketSnapshot(symbol: string): Promise<void> {
+    const snap = await this.fetchMarketSnapshot(symbol);
+    if (!snap) return;
+
+    if (snap.symbol === this.currentSymbol) {
+      this.lastQuote = snap.currentQuote;
+      this.isConnected = true;
+      this.notifyConnectionState();
+    }
+    this.historyListeners.forEach((cb) => cb(snap.symbol, snap.ticks));
+  }
+
+  private mergeSymbolSnapshot(symbol: string, ticks: Tick[], candles: Candle[]) {
+    const existing = this.symbolCache.get(symbol);
+    const mergedMap = new Map<number, Tick>();
+
+    if (existing) {
+      for (const t of existing.ticks) mergedMap.set(t.epoch, t);
+    }
+    for (const t of ticks) {
+      if (t && Number.isFinite(t.epoch) && Number.isFinite(t.quote)) {
+        mergedMap.set(t.epoch, t);
+      }
+    }
+
+    const sorted = Array.from(mergedMap.values())
+      .sort((a, b) => a.epoch - b.epoch)
+      .slice(-MAX_CLIENT_TICKS);
+
+    const lastTick = sorted[sorted.length - 1];
+    this.symbolCache.set(symbol, {
+      ticks: sorted,
+      candles: candles.length > 0 ? candles : existing?.candles || [],
+      lastQuote: lastTick ? lastTick.quote : existing?.lastQuote || this.lastQuote,
+    });
+  }
+
+  private connectServerStream(forceReset = false) {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+    if (this.eventSource && !forceReset) return;
+
+    this.disconnectServerStream();
+    this.stopOfflineFallback();
+    this.started = true;
+
+    try {
+      const es = new EventSource('/api/market/stream');
+      this.eventSource = es;
+
+      es.addEventListener('init', (event: MessageEvent) => {
+        try {
+          const payload = JSON.parse(event.data);
+          this.handleServerFrame(payload, false);
+          this.isConnected = true;
+          this.dataSource = 'demo';
+          this.notifyConnectionState();
+        } catch {
+          // ignore
+        }
+      });
+
+      es.addEventListener('tick', (event: MessageEvent) => {
+        try {
+          const payload = JSON.parse(event.data);
+          this.handleServerFrame(payload, true);
+          if (!this.isConnected) {
+            this.isConnected = true;
+            this.notifyConnectionState();
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      es.onopen = () => {
+        this.isConnected = true;
+        this.stopOfflineFallback();
+        this.notifyConnectionState();
+        void this.syncMarketSnapshot(this.currentSymbol);
+      };
+
+      es.onerror = () => {
+        // Fallback poll keeps continuous sync if SSE temporarily drops (e.g. serverless proxy timeout)
+        this.startServerPollFallback();
+      };
+    } catch {
+      this.startServerPollFallback();
+    }
+  }
+
+  private disconnectServerStream() {
+    if (this.eventSource) {
+      try {
+        this.eventSource.close();
+      } catch {
+        // ignore
+      }
+      this.eventSource = null;
+    }
+    this.started = false;
+  }
+
+  private startServerPollFallback() {
+    if (this.fallbackPollInterval || typeof window === 'undefined') return;
+    this.fallbackPollInterval = setInterval(async () => {
+      if (this.eventSource && this.eventSource.readyState === EventSource.OPEN) {
+        if (this.fallbackPollInterval) {
+          clearInterval(this.fallbackPollInterval);
+          this.fallbackPollInterval = null;
+        }
+        return;
+      }
+      const snap = await this.fetchMarketSnapshot(this.currentSymbol);
+      if (snap && snap.ticks.length > 0) {
+        const latest = snap.ticks[snap.ticks.length - 1];
+        this.lastQuote = latest.quote;
+        this.tickListeners.forEach((cb) => cb(latest));
+        this.botTickListeners.forEach((cb) => cb(latest));
+      }
+    }, 1000);
+  }
+
+  private handleServerFrame(
+    payload: { serverTime?: number; ticks?: Record<string, Tick> },
+    emitToListeners: boolean
+  ) {
+    if (!payload?.ticks) return;
+    if (payload.serverTime) {
+      const lag = Math.abs(Date.now() - payload.serverTime);
+      if (lag < 5000) {
+        this.latencyMs = Math.max(8, Math.min(180, lag));
+      }
+    }
+
+    Object.entries(payload.ticks).forEach(([symbol, tick]) => {
+      if (!tick || !Number.isFinite(tick.quote)) return;
+      const cache = this.symbolCache.get(symbol);
+      if (!cache) {
+        this.symbolCache.set(symbol, {
+          ticks: [tick],
+          candles: [],
+          lastQuote: tick.quote,
+        });
+      } else {
+        const lastCached = cache.ticks[cache.ticks.length - 1];
+        if (!lastCached || tick.epoch > lastCached.epoch) {
+          cache.ticks.push(tick);
+          if (cache.ticks.length > MAX_CLIENT_TICKS) {
+            cache.ticks.shift();
+          }
+          cache.lastQuote = tick.quote;
+        } else {
+          return;
+        }
+      }
+
+      if (symbol === this.currentSymbol) {
+        this.lastQuote = tick.quote;
+        if (emitToListeners) {
+          this.tickListeners.forEach((cb) => cb(tick));
+          this.botTickListeners.forEach((cb) => cb(tick));
+        }
+      }
+    });
+  }
+
   private connectCustomWs(url: string) {
     this.disconnectWs();
+    this.disconnectServerStream();
     try {
       this.ws = new WebSocket(url);
       this.ws.onopen = () => {
         this.isConnected = true;
         this.dataSource = 'live';
         this.latencyMs = 22;
-        this.stopSimulation();
+        this.stopOfflineFallback();
         this.notifyConnectionState();
       };
       this.ws.onmessage = (event) => {
@@ -145,18 +436,14 @@ class MarketDataProviderService {
           if (data.tick) {
             this.handleCustomTick(data.tick);
           }
-        } catch (e) {
-          // parse error
+        } catch {
+          // ignore
         }
       };
-      this.ws.onerror = () => {
-        this.fallbackToSimulation();
-      };
-      this.ws.onclose = () => {
-        this.fallbackToSimulation();
-      };
-    } catch (e) {
-      this.fallbackToSimulation();
+      this.ws.onerror = () => this.fallbackToServerStream();
+      this.ws.onclose = () => this.fallbackToServerStream();
+    } catch {
+      this.fallbackToServerStream();
     }
   }
 
@@ -164,145 +451,109 @@ class MarketDataProviderService {
     if (this.ws) {
       try {
         this.ws.close();
-      } catch (e) {}
+      } catch {
+        // ignore
+      }
       this.ws = null;
     }
   }
 
-  private fallbackToSimulation() {
+  private fallbackToServerStream() {
     this.disconnectWs();
     this.dataSource = 'demo';
     this.isConnected = true;
-    this.latencyMs = 15;
-    this.startSimulation();
+    if (typeof window !== 'undefined') {
+      this.connectServerStream();
+    } else {
+      this.startOfflineFallback();
+    }
     this.notifyConnectionState();
   }
 
   private handleCustomTick(data: { quote: number; epoch?: number }) {
-    const prevQuote = this.lastQuote;
-    this.lastQuote = Number(data.quote);
+    const prevQuote = this.getCurrentQuote();
+    const quote = Number(data.quote);
     const direction: 'up' | 'down' | 'flat' =
-      this.lastQuote > prevQuote ? 'up' : this.lastQuote < prevQuote ? 'down' : 'flat';
-    const lastDigit = extractLastDigit(this.lastQuote, this.currentMarket.decimals);
-
+      quote > prevQuote ? 'up' : quote < prevQuote ? 'down' : 'flat';
+    const lastDigit = extractLastDigit(quote, this.currentMarket.decimals);
     const tick: Tick = {
       epoch: data.epoch ? data.epoch * 1000 : Date.now(),
-      quote: this.lastQuote,
+      quote,
       symbol: this.currentSymbol,
       direction,
       lastDigit,
     };
 
+    this.mergeSymbolSnapshot(this.currentSymbol, [tick], []);
+    this.lastQuote = quote;
     this.tickListeners.forEach((cb) => cb(tick));
+    this.botTickListeners.forEach((cb) => cb(tick));
   }
 
-  private startSimulation() {
-    this.stopSimulation();
+  // Offline/Node-test fallback ONLY (not used when server SSE is active)
+  private startOfflineFallback() {
+    this.stopOfflineFallback();
     this.isConnected = true;
-    this.dataSource = 'demo';
-    this.notifyConnectionState();
-
-    // Generate ticks at realistic intervals (1 tick per second)
-    this.simulationInterval = setInterval(() => {
-      this.generateSimulatedTick();
+    this.fallbackSimInterval = setInterval(() => {
+      this.generateOfflineTick();
     }, 1000);
   }
 
-  private stopSimulation() {
-    if (this.simulationInterval) {
-      clearInterval(this.simulationInterval);
-      this.simulationInterval = null;
+  private stopOfflineFallback() {
+    if (this.fallbackSimInterval) {
+      clearInterval(this.fallbackSimInterval);
+      this.fallbackSimInterval = null;
+    }
+    if (this.fallbackPollInterval) {
+      clearInterval(this.fallbackPollInterval);
+      this.fallbackPollInterval = null;
     }
   }
 
-  private seedInitialHistory() {
-    const symbol = this.currentMarket.symbol;
-    let base = 6000;
-    if (symbol.includes('10')) base = 1250;
-    else if (symbol.includes('25')) base = 2450;
-    else if (symbol.includes('50')) base = 4850;
-    else if (symbol.includes('75')) base = 7500;
-    else if (symbol.includes('100')) base = 6124;
-    else if (symbol.includes('CRASH')) base = 10500;
-    else if (symbol.includes('BOOM')) base = 8200;
+  private seedOfflineHistory(market: Market) {
+    let base = 6124.5;
+    if (market.symbol.includes('CRASH')) base = 10500;
+    else if (market.symbol.includes('BOOM')) base = 8200;
+    else if (market.symbol.includes('75')) base = 7500;
+    else if (market.symbol.includes('50')) base = 4850;
+    else if (market.symbol.includes('25')) base = 2450;
+    else if (market.symbol.includes('10')) base = 1250;
 
-    this.lastQuote = base;
-    const now = Date.now();
-    const count = 60;
-    const candles: Candle[] = [];
-
-    let current = base;
-    for (let i = count; i >= 0; i--) {
-      const time = now - i * 60000;
-      const change = (Math.random() - 0.495) * (base * 0.0008);
-      const open = current;
-      const close = Number((open + change).toFixed(this.currentMarket.decimals));
-      const high = Number((Math.max(open, close) + Math.random() * (base * 0.0004)).toFixed(this.currentMarket.decimals));
-      const low = Number((Math.min(open, close) - Math.random() * (base * 0.0004)).toFixed(this.currentMarket.decimals));
-
-      candles.push({ epoch: time, open, high, low, close });
-      current = close;
+    const now = Math.floor(Date.now() / 1000) * 1000;
+    const stepSize = market.pipSize || 0.01;
+    const ticks: Tick[] = [];
+    let p = base;
+    for (let i = 79; i >= 0; i--) {
+      const next = Number(Math.max(stepSize, p + (Math.random() - 0.498) * stepSize * 14).toFixed(market.decimals));
+      const direction: 'up' | 'down' | 'flat' = next > p ? 'up' : next < p ? 'down' : 'flat';
+      p = next;
+      ticks.push({
+        epoch: now - i * 1000,
+        quote: p,
+        symbol: market.symbol,
+        direction,
+        lastDigit: extractLastDigit(p, market.decimals),
+      });
     }
-
-    this.lastCandles = candles;
-    this.lastQuote = current;
+    this.symbolCache.set(market.symbol, { ticks, candles: [], lastQuote: p });
+    this.lastQuote = p;
   }
 
-  private generateSimulatedTick() {
-    const prevQuote = this.lastQuote;
+  private generateOfflineTick() {
+    const prev = this.getCurrentQuote();
     const stepSize = this.currentMarket.pipSize || 0.01;
-    const decimals = this.currentMarket.decimals;
-
-    // Geometric Brownian Motion step
-    const randomFactor = (Math.random() - 0.498);
-    let delta = randomFactor * (stepSize * 15);
-
-    // Asymmetric spike dynamics for Crash/Boom
-    if (this.currentMarket.category === 'crash_boom') {
-      if (this.currentMarket.symbol.includes('CRASH') && Math.random() < 0.05) {
-        delta = -stepSize * 80; // Sudden drop
-      } else if (this.currentMarket.symbol.includes('BOOM') && Math.random() < 0.05) {
-        delta = stepSize * 80; // Sudden spike
-      }
-    }
-
-    let nextQuote = Number((prevQuote + delta).toFixed(decimals));
-    if (nextQuote <= 0) nextQuote = prevQuote;
-
-    this.lastQuote = nextQuote;
-    const direction: 'up' | 'down' | 'flat' =
-      nextQuote > prevQuote ? 'up' : nextQuote < prevQuote ? 'down' : 'flat';
-    const lastDigit = extractLastDigit(nextQuote, decimals);
-
+    const next = Number(Math.max(stepSize, prev + (Math.random() - 0.498) * stepSize * 15).toFixed(this.currentMarket.decimals));
     const tick: Tick = {
       epoch: Date.now(),
-      quote: nextQuote,
+      quote: next,
       symbol: this.currentSymbol,
-      direction,
-      lastDigit,
+      direction: next > prev ? 'up' : next < prev ? 'down' : 'flat',
+      lastDigit: extractLastDigit(next, this.currentMarket.decimals),
     };
-
-    // Update active candle
-    if (this.lastCandles.length > 0) {
-      const lastCandle = this.lastCandles[this.lastCandles.length - 1];
-      const now = Date.now();
-      if (now - lastCandle.epoch < 60000) {
-        lastCandle.close = nextQuote;
-        if (nextQuote > lastCandle.high) lastCandle.high = nextQuote;
-        if (nextQuote < lastCandle.low) lastCandle.low = nextQuote;
-      } else {
-        this.lastCandles.push({
-          epoch: now,
-          open: nextQuote,
-          high: nextQuote,
-          low: nextQuote,
-          close: nextQuote,
-        });
-        if (this.lastCandles.length > 100) this.lastCandles.shift();
-      }
-    }
-
+    this.mergeSymbolSnapshot(this.currentSymbol, [tick], []);
+    this.lastQuote = next;
     this.tickListeners.forEach((cb) => cb(tick));
+    this.botTickListeners.forEach((cb) => cb(tick));
   }
 
   private notifyConnectionState() {
@@ -313,5 +564,4 @@ class MarketDataProviderService {
 }
 
 export const marketDataProvider = new MarketDataProviderService();
-// Backwards compatibility alias:
 export const derivWsService = marketDataProvider;

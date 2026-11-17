@@ -27,7 +27,7 @@ function TradingAppContent() {
   // The application has exactly TWO main pages: 'home' and 'positions'
   const [currentPage, setCurrentPage] = useState<PageId>('home');
   const [profile, setProfile] = useState<UserProfile>(() => storage.getUserProfile());
-  const [tradingMode, setTradingMode] = useState<'demo' | 'real'>('demo');
+  const [tradingMode, setTradingMode] = useState<'demo' | 'real'>(() => storage.getTradingMode());
 
   // Real Authentication state
   const [authUser, setAuthUser] = useState<AuthUser | null>(() => authClient.getCurrentUser());
@@ -55,10 +55,12 @@ function TradingAppContent() {
   const [latencyMs, setLatencyMs] = useState<number>(18);
   const [liveQuote, setLiveQuote] = useState<number>(marketDataProvider.getCurrentQuote());
 
-  // Shared Trades State between Home and Positions
-  const [activeTrades, setActiveTrades] = useState<Trade[]>([]);
+  // Shared Trades State between Home and Positions (persisted across refreshes)
+  const [activeTrades, setActiveTrades] = useState<Trade[]>(() =>
+    storage.getActiveTrades().filter((t) => t && t.status === 'active')
+  );
   const [completedTrades, setCompletedTrades] = useState<Trade[]>(() =>
-    storage.getTradeHistory().slice(0, 50)
+    storage.getTradeHistory().slice(0, 100)
   );
 
   const activeTradesRef = useRef<Trade[]>(activeTrades);
@@ -67,8 +69,141 @@ function TradingAppContent() {
   const profileRef = useRef<UserProfile>(profile);
   profileRef.current = profile;
 
+  const settlingTradeIdsRef = useRef<Set<string>>(new Set());
+
+  // Keep activeTrades persisted locally on every state transition
+  useEffect(() => {
+    storage.saveActiveTrades(activeTrades);
+  }, [activeTrades]);
+
+  // Persist settled trades cleanly without duplicating IDs or crediting twice
+  const finalizeSettledTrades = (newlyCompleted: Trade[], silent = false) => {
+    if (newlyCompleted.length === 0) return;
+
+    setCompletedTrades((prev) => {
+      const seen = new Set(prev.map((t) => t.id));
+      const uniqueNew = newlyCompleted.filter((t) => !seen.has(t.id));
+      return [...uniqueNew, ...prev].slice(0, 100);
+    });
+
+    newlyCompleted.forEach((trade) => {
+      if (authClient.isAuthenticated()) {
+        authClient.settleTrade(trade).then((balances) => {
+          setProfile((prev) => {
+            const updated = { ...prev, ...balances };
+            storage.saveUserProfile(updated);
+            return updated;
+          });
+        }).catch((error) => {
+          const msg = error instanceof Error ? error.message : '';
+          if (/already.*settled/i.test(msg)) return;
+          console.error('Could not settle simulated trade on server:', error);
+          showToast('error', 'Settlement Needs Attention', 'The server could not confirm this trade settlement. Please refresh and check your account balance.');
+        });
+      } else if (trade.mode === 'demo' && trade.status === 'won') {
+        setProfile((prev) => {
+          const updated = { ...prev, demoBalance: Number((prev.demoBalance + trade.potentialPayout).toFixed(2)) };
+          storage.saveUserProfile(updated);
+          return updated;
+        });
+      }
+      storage.addTrade(trade);
+    });
+
+    if (!silent) {
+      const hasWin = newlyCompleted.some((t) => t.status === 'won');
+      const hasLoss = newlyCompleted.some((t) => t.status === 'lost');
+
+      if (hasWin && !hasLoss) {
+        audioEffects.playWin();
+        showToast(
+          'success',
+          'Contract Won',
+          `Trade settled in profit (+$${newlyCompleted[0].profitLoss.toFixed(2)} USD)`
+        );
+      } else if (hasLoss && !hasWin) {
+        audioEffects.playLoss();
+        showToast(
+          'error',
+          'Contract Lost',
+          `Trade settled at loss (-$${Math.abs(newlyCompleted[0].profitLoss).toFixed(2)} USD)`
+        );
+      } else {
+        audioEffects.playAlert();
+      }
+    }
+  };
+
+  // Reconcile open trades across page refreshes against continuous server tick history
+  const reconcileActiveTrades = async (tradesList: Trade[]) => {
+    const openCandidates = tradesList.filter((t) => t && t.status === 'active');
+    if (openCandidates.length === 0) {
+      setActiveTrades([]);
+      return;
+    }
+
+    const uniqueSymbols = Array.from(new Set(openCandidates.map((t) => t.symbol)));
+    const snapshotBySymbol = new Map<string, Awaited<ReturnType<typeof marketDataProvider.fetchMarketSnapshot>>>();
+    await Promise.all(
+      uniqueSymbols.map(async (sym) => {
+        const snap = await marketDataProvider.fetchMarketSnapshot(sym);
+        snapshotBySymbol.set(sym, snap);
+      })
+    );
+
+    const stillActive: Trade[] = [];
+    const settledNow: Trade[] = [];
+    const now = Date.now();
+
+    for (const trade of openCandidates) {
+      if (settlingTradeIdsRef.current.has(trade.id)) continue;
+
+      const snap = snapshotBySymbol.get(trade.symbol);
+      if (!snap || snap.ticks.length === 0) {
+        stillActive.push(trade);
+        continue;
+      }
+
+      const afterEntryTicks = snap.ticks.filter((t) => t.epoch > trade.entryTime);
+      if (afterEntryTicks.length >= trade.durationTicks) {
+        const exitTick = afterEntryTicks[trade.durationTicks - 1];
+        const recorded = [
+          trade.entryPrice,
+          ...afterEntryTicks.slice(0, trade.durationTicks).map((t) => t.quote),
+        ];
+        settlingTradeIdsRef.current.add(trade.id);
+        const resolved = resolveTrade(trade, exitTick.quote, false, exitTick.epoch, recorded);
+        settledNow.push(resolved);
+      } else if (now >= trade.entryTime + trade.durationTicks * 1000 + 2500) {
+        settlingTradeIdsRef.current.add(trade.id);
+        const resolved = resolveTrade(trade, snap.currentQuote, false, snap.lastTickEpoch || now);
+        settledNow.push(resolved);
+      } else {
+        const remaining = Math.max(1, trade.durationTicks - afterEntryTicks.length);
+        const recorded = [
+          trade.entryPrice,
+          ...afterEntryTicks.map((t) => t.quote),
+        ];
+        stillActive.push({
+          ...trade,
+          remainingTicks: remaining,
+          ticksRecorded: recorded.length > 0 ? recorded : trade.ticksRecorded,
+        });
+      }
+    }
+
+    setActiveTrades(stillActive);
+    if (settledNow.length > 0) {
+      finalizeSettledTrades(settledNow, true);
+    }
+  };
+
   // Session verification and sync
   useEffect(() => {
+    if (!authClient.isAuthenticated() && activeTradesRef.current.length > 0) {
+      void reconcileActiveTrades(activeTradesRef.current);
+    }
+
     authClient.fetchMe().then((u) => {
       if (u) {
         setAuthUser(u);
@@ -89,12 +224,13 @@ function TradingAppContent() {
           const trades = serverTrades as Trade[];
           const openTrades = trades.filter((trade) => trade.status === 'active');
           const settledTrades = trades.filter((trade) => trade.status !== 'active');
-          setActiveTrades(openTrades);
           if (settledTrades.length) {
             storage.replaceTradeHistory(settledTrades);
             setCompletedTrades(settledTrades);
           }
+          void reconcileActiveTrades(openTrades);
         }).catch((error) => console.warn('Could not sync server trade history:', error));
+        void authClient.getRiskProtection().catch((error) => console.warn('Could not sync risk protection state:', error));
       }
     });
 
@@ -122,12 +258,12 @@ function TradingAppContent() {
       setLatencyMs(lat);
     });
 
-    // Central tick listener for active contract countdowns & resolutions
+    // Central tick listener for manual contract countdowns (original 1000ms cadence)
     const unsubTicks = marketDataProvider.subscribeToTicks((tick: Tick) => {
       setLiveQuote(tick.quote);
 
-      if (activeTradesRef.current.length > 0) {
-        processTickForActiveTrades(tick);
+      if (activeTradesRef.current.some((t) => !t.botId)) {
+        processTickForActiveTrades(tick, false);
       }
     });
 
@@ -138,29 +274,56 @@ function TradingAppContent() {
     };
   }, []);
 
-  // Tick progression and trade resolution handler
-  const processTickForActiveTrades = (tick: Tick) => {
+  // Independent high-frequency tick settlement strictly for active automated bot contracts
+  const hasActiveBotTrades = activeTrades.some((t) => Boolean(t.botId));
+  useEffect(() => {
+    if (!hasActiveBotTrades) return;
+
+    const unsubBotTicks = marketDataProvider.subscribeToBotTicks((tick: Tick) => {
+      if (activeTradesRef.current.some((t) => Boolean(t.botId))) {
+        processTickForActiveTrades(tick, true);
+      }
+    });
+
+    return () => unsubBotTicks();
+  }, [hasActiveBotTrades]);
+
+  // Tick progression and trade resolution handler (scoped cleanly between manual and bot trades)
+  const processTickForActiveTrades = (tick: Tick, botOnly: boolean) => {
     const remainingActive: Trade[] = [];
     const newlyCompleted: Trade[] = [];
+    let progressed = false;
 
     activeTradesRef.current.forEach((trade) => {
-      if (trade.symbol !== tick.symbol) {
+      if (settlingTradeIdsRef.current.has(trade.id)) return;
+
+      const isBotTrade = Boolean(trade.botId);
+      if (isBotTrade !== botOnly || trade.symbol !== tick.symbol) {
         remainingActive.push(trade);
         return;
       }
 
+      // Skip ticks at or before trade entry epoch
+      if (tick.epoch && tick.epoch <= trade.entryTime) {
+        remainingActive.push(trade);
+        return;
+      }
+
+      progressed = true;
       const newRemaining = trade.remainingTicks - 1;
       const ticksRecorded = [...trade.ticksRecorded, tick.quote];
 
       // Check if touch condition met early
       if (trade.contractType === 'TOUCH' && trade.barrier && tick.quote >= trade.barrier) {
-        const resolved = resolveTrade(trade, tick.quote, true);
+        settlingTradeIdsRef.current.add(trade.id);
+        const resolved = resolveTrade(trade, tick.quote, true, tick.epoch || Date.now());
         newlyCompleted.push(resolved);
         return;
       }
 
       if (newRemaining <= 0) {
-        const resolved = resolveTrade(trade, tick.quote);
+        settlingTradeIdsRef.current.add(trade.id);
+        const resolved = resolveTrade(trade, tick.quote, false, tick.epoch || Date.now());
         newlyCompleted.push(resolved);
       } else {
         remainingActive.push({
@@ -173,59 +336,20 @@ function TradingAppContent() {
 
     if (newlyCompleted.length > 0) {
       setActiveTrades(remainingActive);
-      setCompletedTrades((prev) => [...newlyCompleted, ...prev].slice(0, 100));
-
-      // Settle authenticated trades atomically in Supabase. Guest demo trades remain local.
-      newlyCompleted.forEach((trade) => {
-        if (authClient.isAuthenticated()) {
-          authClient.settleTrade(trade).then((balances) => {
-            setProfile((prev) => {
-              const updated = { ...prev, ...balances };
-              storage.saveUserProfile(updated);
-              return updated;
-            });
-          }).catch((error) => {
-            console.error('Could not settle simulated trade on server:', error);
-            showToast('error', 'Settlement Needs Attention', 'The server could not confirm this trade settlement. Please refresh and check your account balance.');
-          });
-        } else if (trade.mode === 'demo' && trade.status === 'won') {
-          setProfile((prev) => {
-            const updated = { ...prev, demoBalance: Number((prev.demoBalance + trade.potentialPayout).toFixed(2)) };
-            storage.saveUserProfile(updated);
-            return updated;
-          });
-        }
-        storage.addTrade(trade);
-      });
-
-      // Audio and toast feedback
-      const hasWin = newlyCompleted.some((t) => t.status === 'won');
-      const hasLoss = newlyCompleted.some((t) => t.status === 'lost');
-
-      if (hasWin && !hasLoss) {
-        audioEffects.playWin();
-        showToast(
-          'success',
-          'Contract Won',
-          `Trade settled in profit (+$${newlyCompleted[0].profitLoss.toFixed(2)} USD)`
-        );
-      } else if (hasLoss && !hasWin) {
-        audioEffects.playLoss();
-        showToast(
-          'error',
-          'Contract Lost',
-          `Trade settled at loss (-$${Math.abs(newlyCompleted[0].profitLoss).toFixed(2)} USD)`
-        );
-      } else {
-        audioEffects.playAlert();
-      }
-    } else if (remainingActive.length !== activeTradesRef.current.length) {
+      finalizeSettledTrades(newlyCompleted, false);
+    } else if (progressed) {
       setActiveTrades(remainingActive);
     }
   };
 
   // Resolve contract outcome based on type and final tick
-  const resolveTrade = (trade: Trade, exitPrice: number, earlyWin = false): Trade => {
+  const resolveTrade = (
+    trade: Trade,
+    exitPrice: number,
+    earlyWin = false,
+    exitTime = Date.now(),
+    recordedOverride?: number[]
+  ): Trade => {
     let isWon = false;
     const market = SYNTHETIC_MARKETS.find((m) => m.symbol === trade.symbol) || SYNTHETIC_MARKETS[0];
     const lastDigit = extractLastDigit(exitPrice, market.decimals);
@@ -270,24 +394,21 @@ function TradingAppContent() {
     return {
       ...trade,
       exitPrice,
-      exitTime: Date.now(),
+      exitTime,
       status: isWon ? 'won' : 'lost',
       profitLoss,
       remainingTicks: 0,
-      ticksRecorded: [...trade.ticksRecorded, exitPrice],
+      ticksRecorded: recordedOverride ?? [...trade.ticksRecorded, exitPrice],
     };
   };
 
   const handleToggleMode = (mode: 'demo' | 'real') => {
     setTradingMode(mode);
+    storage.saveTradingMode(mode);
+    if (authClient.isAuthenticated()) {
+      void authClient.syncRiskConfig({ mode });
+    }
     audioEffects.playClick();
-    showToast(
-      'info',
-      `${mode.toUpperCase()} Account Active`,
-      mode === 'demo'
-        ? 'Risk-free practice environment.'
-        : 'Real-balance simulation is paused until market results can be verified by the server. No broker orders are placed.'
-    );
   };
 
   const handleResetBalance = () => {
@@ -488,6 +609,7 @@ function TradingAppContent() {
               profile={profile}
               onUpdateProfile={setProfile}
               tradingMode={tradingMode}
+              onToggleTradingMode={handleToggleMode}
               onNavigate={handleNavigate}
               isWsConnected={isWsConnected}
               dataSource={dataSource}

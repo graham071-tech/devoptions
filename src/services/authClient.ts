@@ -90,6 +90,24 @@ export function normalizeUser(raw: any): AuthUser {
   };
 }
 
+export interface AdminRiskState {
+  userId: string;
+  enabled: boolean;
+  consecutiveLosses: number;
+  maxConsecutiveLosses: number;
+  configuredMaxLoss: number;
+  sessionNetPnl: number;
+  cumulativeLoss: number;
+  activeOpenStake: number;
+  remainingLossAllowance: number;
+  halted: boolean;
+  haltReason: string | null;
+  haltCode: 'MAX_CONSECUTIVE_LOSSES' | 'MAX_LOSS_REACHED' | null;
+  activeMode: 'demo' | 'real';
+  botRunning: boolean;
+  updatedAt: number;
+}
+
 const TOKEN_KEY = 'devoptions_auth_token';
 const USER_KEY = 'devoptions_auth_user';
 
@@ -97,6 +115,8 @@ class AuthClient {
   private token: string | null = null;
   private currentUser: AuthUser | null = null;
   private listeners: ((user: AuthUser | null) => void)[] = [];
+  private lastRiskState: AdminRiskState | null = null;
+  private riskListeners: Set<(state: AdminRiskState | null) => void> = new Set();
 
   constructor() {
     this.token = localStorage.getItem(TOKEN_KEY);
@@ -153,6 +173,23 @@ class AuthClient {
     };
   }
 
+  public getLastRiskState(): AdminRiskState | null {
+    return this.lastRiskState;
+  }
+
+  public subscribeRiskState(cb: (state: AdminRiskState | null) => void): () => void {
+    this.riskListeners.add(cb);
+    cb(this.lastRiskState);
+    return () => {
+      this.riskListeners.delete(cb);
+    };
+  }
+
+  private setRiskState(next: AdminRiskState | null) {
+    this.lastRiskState = next;
+    this.riskListeners.forEach((cb) => cb(next));
+  }
+
   private async readResponse(res: Response): Promise<any> {
     const contentType = res.headers.get('content-type') || '';
     const body = await res.text();
@@ -198,6 +235,7 @@ class AuthClient {
     this.currentUser = null;
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    this.setRiskState(null);
     this.notify();
   }
 
@@ -485,6 +523,66 @@ class AuthClient {
     return Array.isArray(data.trades) ? data.trades : [];
   }
 
+  public async getRiskProtection(): Promise<AdminRiskState | null> {
+    if (!this.getToken()) {
+      this.setRiskState(null);
+      return null;
+    }
+    const res = await fetch('/api/user/risk-protection', {
+      headers: this.getAuthHeaders(),
+      credentials: 'include',
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Could not load risk protection status');
+    const rs = (data.riskState as AdminRiskState | null) ?? null;
+    this.setRiskState(rs);
+    return rs;
+  }
+
+  public async startBotRiskSession(maxLoss: number, mode: 'demo' | 'real'): Promise<AdminRiskState | null> {
+    if (!this.getToken()) return null;
+    const res = await fetch('/api/user/risk-protection/start', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify({ maxLoss, mode }),
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) throw new Error(data.error || 'Could not initialize risk-protected session');
+    const rs = (data.riskState as AdminRiskState | null) ?? null;
+    this.setRiskState(rs);
+    return rs;
+  }
+
+  public async stopBotRiskSession(): Promise<AdminRiskState | null> {
+    if (!this.getToken()) return null;
+    const res = await fetch('/api/user/risk-protection/stop', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) return this.lastRiskState;
+    const rs = (data.riskState as AdminRiskState | null) ?? null;
+    this.setRiskState(rs);
+    return rs;
+  }
+
+  public async syncRiskConfig(params: { mode?: 'demo' | 'real'; maxLoss?: number }): Promise<AdminRiskState | null> {
+    if (!this.getToken()) return null;
+    const res = await fetch('/api/user/risk-protection/config', {
+      method: 'POST',
+      headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+      credentials: 'include',
+      body: JSON.stringify(params),
+    });
+    const data = await this.readResponse(res);
+    if (!res.ok) return this.lastRiskState;
+    const rs = (data.riskState as AdminRiskState | null) ?? null;
+    this.setRiskState(rs);
+    return rs;
+  }
+
   public async placeTrade(trade: any, mode: 'demo' | 'real'): Promise<{ demoBalance: number; realBalance: number }> {
     if (!this.getToken()) throw new Error('Authentication required');
     const res = await fetch('/api/user/trades/place', {
@@ -494,6 +592,9 @@ class AuthClient {
       body: JSON.stringify({ trade, mode }),
     });
     const data = await this.readResponse(res);
+    if (data.riskState !== undefined) {
+      this.setRiskState(data.riskState as AdminRiskState | null);
+    }
     if (!res.ok) throw new Error(data.error || 'Could not place trade');
     if (this.currentUser && data.balances) {
       this.currentUser = { ...this.currentUser, ...data.balances };
@@ -512,6 +613,9 @@ class AuthClient {
       body: JSON.stringify(trade),
     });
     const data = await this.readResponse(res);
+    if (data.riskState !== undefined) {
+      this.setRiskState(data.riskState as AdminRiskState | null);
+    }
     if (!res.ok) throw new Error(data.error || 'Could not settle trade');
     if (this.currentUser && data.balances) {
       this.currentUser = { ...this.currentUser, ...data.balances };

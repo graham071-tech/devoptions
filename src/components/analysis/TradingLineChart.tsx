@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Trade } from '../../types/trading';
-import { Radio, AlertCircle, Maximize2, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { AlertCircle, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 
 export interface PricePoint {
   time: number;
@@ -21,95 +21,125 @@ interface TradingLineChartProps {
   onTimeframeChange?: (tf: string) => void;
 }
 
+const TIMEFRAME_WINDOWS: Record<string, number> = {
+  '1s': 60,
+  '1m': 100,
+  '5m': 140,
+  '15m': 180,
+};
+
 export const TradingLineChart: React.FC<TradingLineChartProps> = ({
   data,
   symbolName,
   decimals,
   currentQuote,
   direction = 'flat',
-  height = 360,
+  height = 340,
   activeTrades = [],
   isWsConnected = true,
-  dataSource = 'live',
-  timeframe = '1m',
+  dataSource = 'demo',
+  timeframe: controlledTimeframe,
   onTimeframeChange,
 }) => {
+  const [internalTimeframe, setInternalTimeframe] = useState<string>(controlledTimeframe || '1s');
+  const activeTimeframe = controlledTimeframe || internalTimeframe;
   const [pointCount, setPointCount] = useState<number>(60);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const [chartDimensions, setChartDimensions] = useState<{ width: number; height: number }>({
-    width: 900,
+    width: 820,
     height: height || 320,
   });
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const el = containerRef.current;
+    if (!el) return;
+
     const updateDimensions = () => {
-      if (containerRef.current) {
-        const w = containerRef.current.clientWidth;
-        const h = containerRef.current.clientHeight;
-        if (w > 200 && h > 100) {
-          setChartDimensions({ width: Math.round(w), height: Math.round(h) });
-        }
+      if (!containerRef.current) return;
+      const w = containerRef.current.clientWidth;
+      const h = containerRef.current.clientHeight;
+      if (w > 60 && h > 60) {
+        setChartDimensions((prev) =>
+          prev.width === Math.round(w) && prev.height === Math.round(h)
+            ? prev
+            : { width: Math.round(w), height: Math.round(h) }
+        );
       }
     };
+
     updateDimensions();
     const ro = new ResizeObserver(() => updateDimensions());
-    ro.observe(containerRef.current);
+    ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
-  // Filter visible points
+  const handleTimeframeSelect = (tf: string) => {
+    setInternalTimeframe(tf);
+    setPointCount(TIMEFRAME_WINDOWS[tf] || 60);
+    if (onTimeframeChange) onTimeframeChange(tf);
+  };
+
+  // Visible slice of live price points
   const visibleData = useMemo(() => {
     if (!data || data.length === 0) return [];
     return data.slice(-pointCount);
   }, [data, pointCount]);
 
-  // Compute price bounds
+  // Compute price bounds safely
   const { minPrice, maxPrice, priceRange } = useMemo(() => {
     if (visibleData.length === 0) {
       const p = currentQuote || 100;
       return { minPrice: p * 0.999, maxPrice: p * 1.001, priceRange: p * 0.002 };
     }
+
     let min = Infinity;
     let max = -Infinity;
-    visibleData.forEach((pt) => {
-      if (pt.price < min) min = pt.price;
-      if (pt.price > max) max = pt.price;
-    });
+    for (const pt of visibleData) {
+      if (Number.isFinite(pt.price)) {
+        if (pt.price < min) min = pt.price;
+        if (pt.price > max) max = pt.price;
+      }
+    }
 
-    // Also include active trades entry price
-    activeTrades.forEach((t) => {
-      if (t.entryPrice < min) min = t.entryPrice;
-      if (t.entryPrice > max) max = t.entryPrice;
-    });
+    for (const t of activeTrades) {
+      if (Number.isFinite(t.entryPrice)) {
+        if (t.entryPrice < min) min = t.entryPrice;
+        if (t.entryPrice > max) max = t.entryPrice;
+      }
+    }
 
-    // Include current quote
-    if (currentQuote < min) min = currentQuote;
-    if (currentQuote > max) max = currentQuote;
+    if (Number.isFinite(currentQuote) && currentQuote > 0) {
+      if (currentQuote < min) min = currentQuote;
+      if (currentQuote > max) max = currentQuote;
+    }
+
+    if (!Number.isFinite(min) || !Number.isFinite(max)) {
+      const p = currentQuote || 100;
+      return { minPrice: p * 0.999, maxPrice: p * 1.001, priceRange: p * 0.002 };
+    }
 
     const diff = max - min;
-    const padding = diff > 0 ? diff * 0.12 : min * 0.001 || 1;
+    const padding = diff > 0 ? diff * 0.14 : Math.max(min * 0.0008, 0.05);
 
     return {
       minPrice: min - padding,
       maxPrice: max + padding,
-      priceRange: max - min + padding * 2,
+      priceRange: diff + padding * 2,
     };
   }, [visibleData, currentQuote, activeTrades]);
 
-  // SVG coordinate calculations
-  const chartWidth = chartDimensions.width;
-  const currentHeight = chartDimensions.height;
-  const paddingLeft = 12;
-  const paddingRight = 68; // Space for right Y-axis prices
+  const chartWidth = Math.max(240, chartDimensions.width);
+  const currentHeight = Math.max(180, chartDimensions.height);
+  const paddingLeft = 10;
+  const paddingRight = 72;
   const paddingTop = 14;
-  const paddingBottom = 26; // Space for X-axis time labels
+  const paddingBottom = 26;
 
-  const innerWidth = Math.max(50, chartWidth - paddingLeft - paddingRight);
-  const innerHeight = Math.max(50, currentHeight - paddingTop - paddingBottom);
+  const innerWidth = Math.max(60, chartWidth - paddingLeft - paddingRight);
+  const innerHeight = Math.max(60, currentHeight - paddingTop - paddingBottom);
 
   const getX = (index: number) => {
     if (visibleData.length <= 1) return paddingLeft + innerWidth / 2;
@@ -122,22 +152,18 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
     return paddingTop + innerHeight - normalized * innerHeight;
   };
 
-  // Generate SVG Path for line and area
+  // Generate SVG path strings cleanly
   const { linePath, areaPath, lastPointCoords } = useMemo(() => {
     if (visibleData.length === 0) {
       return { linePath: '', areaPath: '', lastPointCoords: null };
     }
 
     let d = '';
-    visibleData.forEach((pt, idx) => {
+    for (let idx = 0; idx < visibleData.length; idx++) {
       const x = getX(idx);
-      const y = getY(pt.price);
-      if (idx === 0) {
-        d += `M ${x.toFixed(1)} ${y.toFixed(1)}`;
-      } else {
-        d += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
-      }
-    });
+      const y = getY(visibleData[idx].price);
+      d += idx === 0 ? `M ${x.toFixed(1)} ${y.toFixed(1)}` : ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+    }
 
     const lastIdx = visibleData.length - 1;
     const lastX = getX(lastIdx);
@@ -166,14 +192,13 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
     return ticks;
   }, [minPrice, priceRange, innerHeight]);
 
-  // Time axis ticks (5 points)
+  // Time axis ticks (up to 5 evenly spaced points)
   const xTicks = useMemo(() => {
-    if (visibleData.length === 0) return [];
+    if (visibleData.length < 2) return [];
     const count = Math.min(5, visibleData.length);
     const ticks = [];
-    const step = Math.floor(visibleData.length / count);
     for (let i = 0; i < count; i++) {
-      const idx = Math.min(i * step, visibleData.length - 1);
+      const idx = Math.round((i / (count - 1)) * (visibleData.length - 1));
       const pt = visibleData[idx];
       const x = getX(idx);
       const timeStr = new Date(pt.time).toLocaleTimeString([], {
@@ -186,10 +211,10 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
     return ticks;
   }, [visibleData, innerWidth]);
 
-  // Mouse hover event handler
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!svgRef.current || visibleData.length === 0) return;
     const rect = svgRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return;
     const clickX = ((e.clientX - rect.left) / rect.width) * chartWidth;
 
     if (clickX < paddingLeft || clickX > paddingLeft + innerWidth) {
@@ -199,60 +224,54 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
 
     const relativeX = (clickX - paddingLeft) / innerWidth;
     const index = Math.round(relativeX * (visibleData.length - 1));
-    const clampedIndex = Math.max(0, Math.min(visibleData.length - 1, index));
-    setHoverIndex(clampedIndex);
+    setHoverIndex(Math.max(0, Math.min(visibleData.length - 1, index)));
   };
 
-  const handleMouseLeave = () => {
-    setHoverIndex(null);
-  };
+  const handleMouseLeave = () => setHoverIndex(null);
 
-  const hoveredPoint = hoverIndex !== null && hoverIndex < visibleData.length ? visibleData[hoverIndex] : null;
+  const hoveredPoint =
+    hoverIndex !== null && hoverIndex < visibleData.length ? visibleData[hoverIndex] : null;
+
+  const badgeFill =
+    direction === 'up' ? '#047857' : direction === 'down' ? '#be123c' : '#0e7490';
+  const badgeStroke =
+    direction === 'up' ? '#34d399' : direction === 'down' ? '#fb7185' : '#22d3ee';
 
   return (
-    <div className="bg-[#090D16] border border-slate-800 rounded-lg p-2 sm:p-2.5 space-y-1 select-none flex flex-col flex-1 min-h-[180px] overflow-hidden">
-      {/* Chart Top Header: Symbol, Timeframe & Zoom Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-slate-800/60 shrink-0">
-        <div className="flex items-center gap-3">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-xs sm:text-sm text-slate-100 font-sans tracking-tight">
-                {symbolName}
-              </span>
-              <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-semibold uppercase">
-                Line Feed
-              </span>
-            </div>
-            <div className="flex items-center gap-2 mt-0.5">
-              <span
-                className={`font-mono text-xs sm:text-sm font-bold tabular-nums ${
-                  direction === 'up'
-                    ? 'text-emerald-400'
-                    : direction === 'down'
-                    ? 'text-rose-400'
-                    : 'text-slate-200'
-                }`}
-              >
-                {currentQuote > 0 ? currentQuote.toFixed(decimals) : '—'}
-              </span>
-              <span className="text-[10px] text-slate-500 font-mono">
-                {dataSource === 'live' && isWsConnected ? 'Deriv Stream' : 'Live Tick Stream'}
-              </span>
-            </div>
-          </div>
+    <div className="w-full h-full flex flex-col min-h-[240px] bg-[#090D16] select-none overflow-hidden">
+      {/* Compact Institutional Chart Toolbar */}
+      <div className="px-3 py-1.5 border-b border-slate-800/80 bg-[#0A0F1A] flex flex-wrap items-center justify-between gap-2 shrink-0">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="font-semibold text-xs text-slate-100 tracking-tight truncate">
+            {symbolName}
+          </span>
+          <span className="text-[10px] font-mono text-slate-500">
+            {dataSource === 'live' && isWsConnected ? 'Live Stream' : 'Tick Chart'}
+          </span>
+          <span
+            className={`font-mono text-xs font-semibold tabular-nums ${
+              direction === 'up'
+                ? 'text-emerald-400'
+                : direction === 'down'
+                ? 'text-rose-400'
+                : 'text-slate-200'
+            }`}
+          >
+            {currentQuote > 0 ? currentQuote.toFixed(decimals) : '—'}
+          </span>
         </div>
 
-        {/* Timeframe & Zoom controls */}
+        {/* Timeframe & Zoom Controls */}
         <div className="flex items-center gap-1.5 text-xs">
-          {/* Timeframe tabs */}
-          <div className="flex bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-[10px] font-mono">
-            {['1s', '1m', '5m', '15m'].map((tf) => (
+          <div className="flex bg-slate-950 p-0.5 rounded border border-slate-800 text-[10px] font-mono">
+            {(['1s', '1m', '5m', '15m'] as const).map((tf) => (
               <button
                 key={tf}
-                onClick={() => onTimeframeChange && onTimeframeChange(tf)}
-                className={`px-1.5 py-0.5 rounded transition-colors ${
-                  timeframe === tf
-                    ? 'bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/40'
+                type="button"
+                onClick={() => handleTimeframeSelect(tf)}
+                className={`px-1.5 py-0.5 rounded-sm transition-colors cursor-pointer ${
+                  activeTimeframe === tf
+                    ? 'bg-slate-800 text-cyan-300 font-semibold'
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
@@ -261,26 +280,31 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
             ))}
           </div>
 
-          {/* Zoom In/Out */}
-          <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+          <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded border border-slate-800">
             <button
-              onClick={() => setPointCount((prev) => Math.max(30, prev - 15))}
-              className="p-1 text-slate-400 hover:text-cyan-400 rounded transition-colors"
-              title="Zoom In (Fewer points)"
+              type="button"
+              onClick={() => setPointCount((prev) => Math.max(25, prev - 15))}
+              className="p-1 text-slate-400 hover:text-cyan-300 rounded-sm transition-colors cursor-pointer"
+              title="Zoom In"
             >
               <ZoomIn className="w-3 h-3" />
             </button>
             <button
-              onClick={() => setPointCount((prev) => Math.min(150, prev + 15))}
-              className="p-1 text-slate-400 hover:text-cyan-400 rounded transition-colors"
-              title="Zoom Out (More points)"
+              type="button"
+              onClick={() => setPointCount((prev) => Math.min(200, prev + 15))}
+              className="p-1 text-slate-400 hover:text-cyan-300 rounded-sm transition-colors cursor-pointer"
+              title="Zoom Out"
             >
               <ZoomOut className="w-3 h-3" />
             </button>
             <button
-              onClick={() => setPointCount(60)}
-              className="p-1 text-slate-400 hover:text-slate-200 rounded transition-colors"
-              title="Reset Zoom"
+              type="button"
+              onClick={() => {
+                setInternalTimeframe('1s');
+                setPointCount(60);
+              }}
+              className="p-1 text-slate-400 hover:text-slate-200 rounded-sm transition-colors cursor-pointer"
+              title="Reset Scale"
             >
               <RotateCcw className="w-3 h-3" />
             </button>
@@ -288,45 +312,32 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
         </div>
       </div>
 
-      {/* Main SVG Line Chart Area */}
-      <div ref={containerRef} className="relative w-full flex-1 min-h-[140px] overflow-hidden">
+      {/* Main SVG Line Chart Canvas */}
+      <div ref={containerRef} className="relative w-full flex-1 min-h-[200px] overflow-hidden bg-[#080C14]">
         {visibleData.length === 0 ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-500 space-y-2">
-            <AlertCircle className="w-6 h-6 text-slate-600 animate-pulse" />
+            <AlertCircle className="w-5 h-5 text-slate-600 animate-pulse" />
             <span className="text-xs font-mono">Connecting to live price feed...</span>
           </div>
         ) : (
           <svg
             ref={svgRef}
+            width="100%"
+            height="100%"
             viewBox={`0 0 ${chartWidth} ${currentHeight}`}
-            className="w-full h-full cursor-crosshair"
+            className="block w-full h-full cursor-crosshair"
             onMouseMove={handleMouseMove}
             onMouseLeave={handleMouseLeave}
           >
             <defs>
-              {/* Cyan Gradient for Area Fill under line */}
               <linearGradient id="lineAreaGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.28" />
-                <stop offset="70%" stopColor="#06b6d4" stopOpacity="0.04" />
-                <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.0" />
+                <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.18" />
+                <stop offset="75%" stopColor="#22d3ee" stopOpacity="0.03" />
+                <stop offset="100%" stopColor="#22d3ee" stopOpacity="0.0" />
               </linearGradient>
-
-              {/* Grid Line Pattern */}
-              <pattern id="chartGrid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="0.5" strokeOpacity="0.4" />
-              </pattern>
             </defs>
 
-            {/* Background Grid */}
-            <rect
-              x={paddingLeft}
-              y={paddingTop}
-              width={innerWidth}
-              height={innerHeight}
-              fill="url(#chartGrid)"
-            />
-
-            {/* Horizontal Price Grid Lines & Y-Axis Labels */}
+            {/* Horizontal Price Grid Lines & Right Y-Axis Scale */}
             {yTicks.map((tick, i) => (
               <g key={`ytick-${i}`}>
                 <line
@@ -334,23 +345,23 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
                   y1={tick.y}
                   x2={paddingLeft + innerWidth}
                   y2={tick.y}
-                  stroke="#1e293b"
+                  stroke="#162033"
                   strokeWidth="0.8"
-                  strokeDasharray="3 3"
+                  strokeDasharray="2 3"
                 />
                 <text
                   x={paddingLeft + innerWidth + 6}
                   y={tick.y + 3}
                   fill="#64748b"
                   fontSize="10"
-                  fontFamily="monospace"
+                  fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                 >
                   {tick.price.toFixed(decimals)}
                 </text>
               </g>
             ))}
 
-            {/* Vertical Time Grid Lines & X-Axis Labels */}
+            {/* Vertical Time Grid Lines & Bottom X-Axis Labels */}
             {xTicks.map((tick, i) => (
               <g key={`xtick-${i}`}>
                 <line
@@ -358,16 +369,16 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
                   y1={paddingTop}
                   x2={tick.x}
                   y2={paddingTop + innerHeight}
-                  stroke="#1e293b"
+                  stroke="#162033"
                   strokeWidth="0.8"
-                  strokeDasharray="3 3"
+                  strokeDasharray="2 3"
                 />
                 <text
                   x={tick.x}
-                  y={paddingTop + innerHeight + 18}
+                  y={paddingTop + innerHeight + 17}
                   fill="#64748b"
                   fontSize="9"
-                  fontFamily="monospace"
+                  fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                   textAnchor="middle"
                 >
                   {tick.timeStr}
@@ -375,10 +386,30 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
               </g>
             ))}
 
-            {/* Active Trades Entry Lines */}
+            {/* Right Y-Axis Divider */}
+            <line
+              x1={paddingLeft + innerWidth}
+              y1={paddingTop}
+              x2={paddingLeft + innerWidth}
+              y2={paddingTop + innerHeight}
+              stroke="#1e293b"
+              strokeWidth="1"
+            />
+
+            {/* Bottom X-Axis Divider */}
+            <line
+              x1={paddingLeft}
+              y1={paddingTop + innerHeight}
+              x2={paddingLeft + innerWidth}
+              y2={paddingTop + innerHeight}
+              stroke="#1e293b"
+              strokeWidth="1"
+            />
+
+            {/* Active Trade Entry Lines */}
             {activeTrades.map((trade) => {
               const tradeY = getY(trade.entryPrice);
-              const isCall = trade.contractType === 'CALL';
+              const isCall = trade.contractType === 'CALL' || trade.contractType === 'EVEN';
               return (
                 <g key={trade.id}>
                   <line
@@ -388,90 +419,91 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
                     y2={tradeY}
                     stroke={isCall ? '#10b981' : '#f43f5e'}
                     strokeWidth="1.2"
-                    strokeDasharray="4 2"
+                    strokeDasharray="4 3"
                   />
                   <rect
                     x={paddingLeft + 4}
-                    y={tradeY - 9}
-                    width="80"
+                    y={Math.max(paddingTop, tradeY - 9)}
+                    width="96"
                     height="18"
-                    rx="4"
+                    rx="3"
                     fill={isCall ? '#064e3b' : '#881337'}
                     stroke={isCall ? '#10b981' : '#f43f5e'}
                     strokeWidth="0.8"
                   />
                   <text
-                    x={paddingLeft + 44}
-                    y={tradeY + 3}
+                    x={paddingLeft + 52}
+                    y={Math.max(paddingTop + 12, tradeY + 3)}
                     fill="#ffffff"
                     fontSize="9"
-                    fontFamily="monospace"
+                    fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                     fontWeight="bold"
                     textAnchor="middle"
                   >
-                    ENTRY {trade.contractType}
+                    {trade.contractType} ({trade.remainingTicks}t)
                   </text>
                 </g>
               );
             })}
 
-            {/* Area fill under price line */}
+            {/* Area Fill */}
             {areaPath && <path d={areaPath} fill="url(#lineAreaGradient)" />}
 
-            {/* Main Price Line */}
+            {/* Main Live Price Line */}
             {linePath && (
               <path
                 d={linePath}
                 fill="none"
                 stroke="#22d3ee"
-                strokeWidth="2"
+                strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
-                className="transition-all duration-150"
               />
             )}
 
-            {/* Latest Price Current Marker & Horizontal Floating Line */}
+            {/* Live Current Price Guideline & Y-Axis Indicator */}
             {lastPointCoords && (
               <g>
-                {/* Horizontal dashed price guideline */}
                 <line
                   x1={paddingLeft}
                   y1={lastPointCoords.y}
                   x2={paddingLeft + innerWidth}
                   y2={lastPointCoords.y}
-                  stroke="#0891b2"
-                  strokeWidth="0.8"
-                  strokeDasharray="2 2"
-                  strokeOpacity="0.8"
+                  stroke={badgeStroke}
+                  strokeWidth="0.9"
+                  strokeDasharray="3 3"
+                  strokeOpacity="0.75"
                 />
 
-                {/* Clean spot dot on latest price */}
                 <circle
                   cx={lastPointCoords.x}
                   cy={lastPointCoords.y}
                   r="3.5"
-                  fill="#22d3ee"
-                  stroke="#090D16"
+                  fill={badgeStroke}
+                  stroke="#080C14"
                   strokeWidth="1.5"
                 />
 
-                {/* Floating Price Box on Right Y-Axis */}
-                <g transform={`translate(${paddingLeft + innerWidth + 2}, ${lastPointCoords.y - 9})`}>
+                <g
+                  transform={`translate(${paddingLeft + innerWidth + 2}, ${Math.max(
+                    paddingTop,
+                    Math.min(paddingTop + innerHeight - 18, lastPointCoords.y - 9)
+                  )})`}
+                >
                   <rect
-                    width="62"
+                    width="66"
                     height="18"
                     rx="2"
-                    fill="#0e7490"
-                    stroke="#22d3ee"
+                    fill={badgeFill}
+                    stroke={badgeStroke}
                     strokeWidth="0.8"
                   />
                   <text
-                    x="31"
+                    x="33"
                     y="12"
                     fill="#ffffff"
                     fontSize="9"
-                    fontFamily="monospace"
+                    fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                     fontWeight="bold"
                     textAnchor="middle"
                   >
@@ -481,53 +513,46 @@ export const TradingLineChart: React.FC<TradingLineChartProps> = ({
               </g>
             )}
 
-            {/* Crosshair Hover Lines & Tooltip */}
+            {/* Hover Crosshair */}
             {hoveredPoint && hoverIndex !== null && (
               <g>
-                {/* Vertical Crosshair Line */}
                 <line
                   x1={getX(hoverIndex)}
                   y1={paddingTop}
                   x2={getX(hoverIndex)}
                   y2={paddingTop + innerHeight}
-                  stroke="#94a3b8"
-                  strokeWidth="1"
+                  stroke="#64748b"
+                  strokeWidth="0.9"
                   strokeDasharray="2 2"
                 />
-                {/* Horizontal Crosshair Line */}
                 <line
                   x1={paddingLeft}
                   y1={getY(hoveredPoint.price)}
                   x2={paddingLeft + innerWidth}
                   y2={getY(hoveredPoint.price)}
-                  stroke="#94a3b8"
-                  strokeWidth="1"
+                  stroke="#64748b"
+                  strokeWidth="0.9"
                   strokeDasharray="2 2"
                 />
-                {/* Crosshair Dot */}
                 <circle
                   cx={getX(hoverIndex)}
                   cy={getY(hoveredPoint.price)}
-                  r="4"
+                  r="3.5"
                   fill="#ffffff"
-                  stroke="#06b6d4"
-                  strokeWidth="2"
+                  stroke="#22d3ee"
+                  strokeWidth="1.5"
                 />
               </g>
             )}
           </svg>
         )}
 
-        {/* Hover Tooltip Overlay Box */}
+        {/* Hover Readout */}
         {hoveredPoint && (
-          <div
-            className="absolute top-2 left-3 bg-slate-900/90 border border-slate-700/80 rounded-lg px-3 py-1.5 text-[11px] font-mono shadow-xl pointer-events-none backdrop-blur-sm space-y-0.5"
-          >
-            <div className="text-slate-400 text-[10px]">
-              {new Date(hoveredPoint.time).toLocaleTimeString()}
-            </div>
-            <div className="text-cyan-300 font-bold">
-              Spot: ${hoveredPoint.price.toFixed(decimals)}
+          <div className="absolute top-2 left-3 bg-[#0D1322]/95 border border-slate-700/80 rounded px-2.5 py-1 text-[10px] font-mono pointer-events-none space-y-0.5">
+            <div className="text-slate-400">{new Date(hoveredPoint.time).toLocaleTimeString()}</div>
+            <div className="text-cyan-300 font-semibold tabular-nums">
+              {hoveredPoint.price.toFixed(decimals)}
             </div>
           </div>
         )}

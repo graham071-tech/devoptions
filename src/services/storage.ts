@@ -11,8 +11,44 @@ import {
 const USER_KEY = 'binarypro_user_profile_v2';
 const STRATEGIES_KEY = 'binarypro_strategies_v2';
 const TRADES_KEY = 'binarypro_trades_v2';
+const ACTIVE_TRADES_KEY = 'devoptions_active_trades_v1';
 const TRANSACTIONS_KEY = 'binarypro_transactions_v2';
 const COPY_ALLOCATIONS_KEY = 'binarypro_copy_allocations_v2';
+const SELECTED_MARKET_KEY = 'devoptions_selected_market_v1';
+const TRADING_MODE_KEY = 'devoptions_trading_mode_v1';
+const BOT_PREFS_KEY = 'devoptions_bot_prefs_v1';
+const BOT_SESSION_KEY = 'devoptions_bot_session_v1';
+const DIGIT_WINDOW_KEY = 'devoptions_digit_window_v1';
+
+export interface PersistedBotPreferences {
+  executionMode: 'automated' | 'manual';
+  stake: number;
+  contractType: Trade['contractType'];
+  durationTicks: number;
+  targetProfit: number;
+  maxLoss: number;
+}
+
+export interface PersistedBotSession {
+  botStatus: 'idle' | 'scanning' | 'ready' | 'running' | 'stopping' | 'stopped' | 'error';
+  botPhase: string;
+  stopReason: string;
+  botSessionId: string;
+  processedTradeIds: string[];
+  botConfig: {
+    targetProfit: number;
+    maxLoss: number;
+    stake: number;
+    contractType: Trade['contractType'];
+    durationTicks: number;
+  } | null;
+  sessionStats: {
+    realizedPnl: number;
+    tradesCount: number;
+    wins: number;
+    losses: number;
+  };
+}
 
 export const VETTED_COPY_TRADERS: CopyTrader[] = [
   {
@@ -180,6 +216,9 @@ class StorageService {
 
   public addTrade(trade: Trade): Trade[] {
     const trades = this.getTradeHistory();
+    if (trades.some((t) => t.id === trade.id)) {
+      return trades;
+    }
     trades.unshift(trade);
     const trimmed = trades.slice(0, 500);
     try {
@@ -188,6 +227,124 @@ class StorageService {
       console.error('Failed to store trade', e);
     }
     return trimmed;
+  }
+
+  public getActiveTrades(): Trade[] {
+    try {
+      const data = localStorage.getItem(ACTIVE_TRADES_KEY);
+      if (data) {
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) return parsed;
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  }
+
+  public saveActiveTrades(trades: Trade[]): void {
+    try {
+      localStorage.setItem(ACTIVE_TRADES_KEY, JSON.stringify(trades));
+    } catch {
+      // ignore
+    }
+  }
+
+  public getSelectedMarketSymbol(): string {
+    try {
+      return localStorage.getItem(SELECTED_MARKET_KEY) || 'R_100';
+    } catch {
+      return 'R_100';
+    }
+  }
+
+  public saveSelectedMarketSymbol(symbol: string): void {
+    try {
+      localStorage.setItem(SELECTED_MARKET_KEY, symbol);
+    } catch {
+      // ignore
+    }
+  }
+
+  public getTradingMode(): 'demo' | 'real' {
+    try {
+      return localStorage.getItem(TRADING_MODE_KEY) === 'real' ? 'real' : 'demo';
+    } catch {
+      return 'demo';
+    }
+  }
+
+  public saveTradingMode(mode: 'demo' | 'real'): void {
+    try {
+      localStorage.setItem(TRADING_MODE_KEY, mode);
+    } catch {
+      // ignore
+    }
+  }
+
+  public getBotPreferences(): PersistedBotPreferences {
+    const defaults: PersistedBotPreferences = {
+      executionMode: 'automated',
+      stake: 5,
+      contractType: 'CALL',
+      durationTicks: 5,
+      targetProfit: 20,
+      maxLoss: 15,
+    };
+    try {
+      const raw = localStorage.getItem(BOT_PREFS_KEY);
+      if (raw) {
+        return { ...defaults, ...JSON.parse(raw) };
+      }
+    } catch {
+      // ignore
+    }
+    return defaults;
+  }
+
+  public saveBotPreferences(prefs: PersistedBotPreferences): void {
+    try {
+      localStorage.setItem(BOT_PREFS_KEY, JSON.stringify(prefs));
+    } catch {
+      // ignore
+    }
+  }
+
+  public getBotSessionState(): PersistedBotSession | null {
+    try {
+      const raw = localStorage.getItem(BOT_SESSION_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  public saveBotSessionState(state: PersistedBotSession | null): void {
+    try {
+      if (!state) localStorage.removeItem(BOT_SESSION_KEY);
+      else localStorage.setItem(BOT_SESSION_KEY, JSON.stringify(state));
+    } catch {
+      // ignore
+    }
+  }
+
+  public getDigitSampleWindow(): number {
+    try {
+      const v = Number(localStorage.getItem(DIGIT_WINDOW_KEY));
+      if (v === 25 || v === 50 || v === 100) return v;
+    } catch {
+      // ignore
+    }
+    return 50;
+  }
+
+  public saveDigitSampleWindow(sz: number): void {
+    try {
+      localStorage.setItem(DIGIT_WINDOW_KEY, String(sz));
+    } catch {
+      // ignore
+    }
   }
 
   public replaceTradeHistory(trades: Trade[]): void {
