@@ -17,11 +17,7 @@ import {
   DollarSign,
   UserPlus,
   RefreshCw,
-  KeyRound,
-  Copy,
-  Check,
   Trash2,
-  ArrowUpRight,
   Search,
   Lock,
   Mail,
@@ -29,7 +25,6 @@ import {
   Crown,
   Eye,
   EyeOff,
-  UserCheck,
 } from 'lucide-react';
 
 interface AdminPortalModalProps {
@@ -43,6 +38,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
   isOpen,
   onClose,
   currentUser,
+  onOpenAuthModal,
 }) => {
   const { showToast } = useToast();
 
@@ -51,12 +47,11 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // New admin form state
   const [newAdminEmail, setNewAdminEmail] = useState<string>('');
-  const [newAdminPhone, setNewAdminPhone] = useState<string>('+18005550199');
-  const [newAdminPassword, setNewAdminPassword] = useState<string>('Admin@DevOptions2026!');
+  const [newAdminPhone, setNewAdminPhone] = useState<string>('');
+  const [newAdminPassword, setNewAdminPassword] = useState<string>('');
   const [newAdminName, setNewAdminName] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [creatingAdmin, setCreatingAdmin] = useState<boolean>(false);
@@ -93,12 +88,39 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
 
   if (!isOpen) return null;
 
-  const copyToClipboard = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    showToast('info', 'Copied to Clipboard', text);
-    setTimeout(() => setCopiedKey(null), 2000);
-  };
+  if (!isAdmin) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+        <div className="bg-[#0A0E18] border border-rose-500/30 rounded-2xl w-full max-w-md p-6 shadow-2xl text-center space-y-4 text-slate-100">
+          <div className="w-12 h-12 mx-auto rounded-full bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-400">
+            <ShieldAlert className="w-6 h-6" />
+          </div>
+          <div className="space-y-1">
+            <h2 className="text-base font-bold">Administrator Access Required</h2>
+            <p className="text-xs text-slate-400">
+              Please sign in with an administrator account to access the management portal.
+            </p>
+          </div>
+          <div className="flex items-center justify-center gap-2 pt-2">
+            {onOpenAuthModal && (
+              <button
+                onClick={onOpenAuthModal}
+                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold cursor-pointer"
+              >
+                Sign In
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const handleToggleRole = async (user: AdminUserRecord) => {
     const newRole = user.role === 'admin' ? 'user' : 'admin';
@@ -201,7 +223,7 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-400">
-                Logged in as <span className="text-amber-400 font-mono font-semibold">{currentUser?.email || 'admin@devoptions.io'}</span> (Role: Admin)
+                Logged in as <span className="text-amber-400 font-mono font-semibold">{currentUser?.email || 'Administrator'}</span> (Role: Admin)
               </p>
             </div>
           </div>
@@ -219,32 +241,6 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
               className="p-1.5 text-slate-400 hover:text-slate-100 rounded-lg hover:bg-slate-800 transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* Admin Quick Credentials Banner */}
-        <div className="bg-amber-950/20 border-b border-amber-900/30 px-5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-amber-400 shrink-0" />
-            <span className="text-slate-300 text-[11px]">
-              <strong className="text-amber-300">Admin Login Credentials:</strong> Email: <code className="text-slate-100 bg-slate-900/80 px-1 py-0.5 rounded font-mono">admin@devoptions.io</code> or <code className="text-slate-100 bg-slate-900/80 px-1 py-0.5 rounded font-mono">francisgraham071@gmail.com</code> | Password: <code className="text-slate-100 bg-slate-900/80 px-1 py-0.5 rounded font-mono">Admin@DevOptions2026!</code>
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => copyToClipboard('admin@devoptions.io', 'email')}
-              className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-[10px] font-mono border border-slate-700 text-slate-300 flex items-center gap-1 transition-colors cursor-pointer"
-            >
-              {copiedKey === 'email' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-              <span>Copy Email</span>
-            </button>
-            <button
-              onClick={() => copyToClipboard('Admin@DevOptions2026!', 'pwd')}
-              className="px-2 py-1 rounded bg-slate-900 hover:bg-slate-800 text-[10px] font-mono border border-slate-700 text-slate-300 flex items-center gap-1 transition-colors cursor-pointer"
-            >
-              {copiedKey === 'pwd' ? <Check className="w-3 h-3 text-emerald-400" /> : <KeyRound className="w-3 h-3" />}
-              <span>Copy Password</span>
             </button>
           </div>
         </div>
@@ -545,23 +541,22 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
                 </div>
               </div>
 
-              {/* Admin Accounts Table */}
+              {/* Active Admin Accounts (loaded from backend for authenticated admins only) */}
               <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800 space-y-2">
                 <h3 className="text-xs font-bold text-slate-200 uppercase font-mono flex items-center gap-2">
                   <Crown className="w-4 h-4 text-amber-400" />
                   <span>Authorized Administrator Accounts</span>
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                  <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 text-xs">
-                    <div className="font-bold text-amber-300">Master Root Admin</div>
-                    <div className="text-slate-300 font-mono text-[11px] mt-0.5">admin@devoptions.io</div>
-                    <div className="text-slate-500 text-[10px] mt-1">Phone: +1 (800) 555-0199 • Default: Admin@DevOptions2026!</div>
-                  </div>
-                  <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 text-xs">
-                    <div className="font-bold text-amber-300">Dedicated Platform Admin</div>
-                    <div className="text-slate-300 font-mono text-[11px] mt-0.5">francisgraham071@gmail.com</div>
-                    <div className="text-slate-500 text-[10px] mt-1">Phone: +1 (234) 567-8900 • Default: Admin@DevOptions2026!</div>
-                  </div>
+                  {users
+                    .filter((u) => u.role === 'admin')
+                    .map((adm) => (
+                      <div key={adm.id} className="p-3 bg-slate-950 rounded-lg border border-slate-800 text-xs">
+                        <div className="font-bold text-amber-300">{adm.fullName || 'Platform Admin'}</div>
+                        <div className="text-slate-300 font-mono text-[11px] mt-0.5">{adm.email}</div>
+                        <div className="text-slate-500 text-[10px] mt-1">Phone: {adm.phone}</div>
+                      </div>
+                    ))}
                 </div>
               </div>
             </div>

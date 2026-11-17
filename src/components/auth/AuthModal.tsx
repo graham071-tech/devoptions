@@ -16,7 +16,6 @@ import {
   RotateCcw,
   KeyRound,
   ShieldAlert,
-  Crown,
   User,
 } from 'lucide-react';
 
@@ -45,7 +44,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Form fields
   const [fullName, setFullName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
-  const [phone, setPhone] = useState<string>('+');
+  const [phone, setPhone] = useState<string>('');
   const [password, setPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [showPassword, setShowPassword] = useState<boolean>(false);
@@ -101,7 +100,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
 
     // Intelligent phone normalization for user convenience
-    const cleanPhone = phone.trim().replace(/[\s\-\(\)\.]/g, '');
+    let cleanPhone = phone.trim().replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '+');
+    if (/^\+0[17]\d{8}$/.test(cleanPhone)) {
+      cleanPhone = cleanPhone.slice(1);
+    }
     let formattedPhone = cleanPhone;
     if (/^0[17]\d{8}$/.test(cleanPhone)) {
       formattedPhone = '+254' + cleanPhone.substring(1);
@@ -522,46 +524,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           ───────────────────────────────────────────────────────────── */}
           {mode === 'login' && (
             <div className="space-y-3.5">
-              {/* Admin Quick Login Helper Card */}
-              <div className="p-2.5 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-1.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 text-amber-300 font-bold font-mono text-[10px] uppercase">
-                    <Crown className="w-3.5 h-3.5 fill-current text-amber-400" />
-                    <span>Administrator Access</span>
-                  </div>
-                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-semibold">
-                    ROLE: ADMIN
-                  </span>
-                </div>
-                <p className="text-[10px] text-slate-300 leading-tight">
-                  Pre-configured administrator accounts are active. Click to auto-fill credentials:
-                </p>
-                <div className="grid grid-cols-2 gap-1.5 pt-0.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEmail('admin@devoptions.io');
-                      setPassword('Admin@DevOptions2026!');
-                      showToast('info', 'Admin Filled', 'Master Admin credentials loaded.');
-                    }}
-                    className="px-2 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-200 text-[10px] font-mono font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer"
-                  >
-                    <span>👑 admin@devoptions.io</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEmail('francisgraham071@gmail.com');
-                      setPassword('Admin@DevOptions2026!');
-                      showToast('info', 'Admin Filled', 'Francis Graham Admin credentials loaded.');
-                    }}
-                    className="px-2 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-200 text-[10px] font-mono font-semibold flex items-center justify-center gap-1 transition-colors cursor-pointer truncate"
-                  >
-                    <span>👑 francisgraham...</span>
-                  </button>
-                </div>
-              </div>
-
               <form onSubmit={handleLogin} className="space-y-3.5">
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold text-slate-400 uppercase font-mono">

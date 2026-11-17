@@ -10,6 +10,7 @@
     "backend.ts",
     "api/**/*.ts",
     "scripts/**/*.ts",
+    "server/**/*.ts",
     "src/services/**/*.ts",
     "dev-server.ts"
   ],

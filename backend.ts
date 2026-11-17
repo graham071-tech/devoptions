@@ -2,12 +2,36 @@ import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { paynectaService } from './src/services/paynectaService';
-import { getSupabaseClient } from './src/services/supabaseService';
+import {
+  getSupabaseClient,
+  isSupabaseTransportError,
+  markSupabaseUnreachable,
+  shouldUseLocalFallback,
+} from './src/services/supabaseService';
+import { localFallbackStore } from './server/localFallbackStore';
 
 dotenv.config();
 
 const app = express();
 export { app };
+
+async function withStoreFallback<T>(
+  supabaseFn: () => Promise<T>,
+  localFn: () => T | Promise<T>
+): Promise<T> {
+  if (await shouldUseLocalFallback()) {
+    return await localFn();
+  }
+  try {
+    return await supabaseFn();
+  } catch (err) {
+    if (isSupabaseTransportError(err)) {
+      markSupabaseUnreachable();
+      return await localFn();
+    }
+    throw err;
+  }
+}
 
 // Restrict credentialed cross-origin requests to configured application origins.
 const allowedOrigins = new Set(
@@ -179,7 +203,10 @@ function normalizeEmail(email: string): string {
 }
 
 function normalizePhone(phone: string): string {
-  let cleaned = phone.trim().replace(/[\s\-\(\)\.]/g, '');
+  let cleaned = phone.trim().replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '+');
+  if (/^\+0[17]\d{8}$/.test(cleaned)) {
+    cleaned = cleaned.slice(1);
+  }
   // If user entered Kenyan 07XX or 01XX (10 digits starting with 0)
   if (/^0[17]\d{8}$/.test(cleaned)) {
     return '+254' + cleaned.substring(1);
@@ -295,64 +322,115 @@ async function requireAuth(
       });
     }
 
-    const supabase = getSupabaseClient();
+    const authResult = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: session, error: sessionError } = await supabase
+          .from('sessions')
+          .select('*')
+          .eq('token', token)
+          .maybeSingle();
 
-    const { data: session, error: sessionError } = await supabase
-      .from('sessions')
-      .select('*')
-      .eq('token', token)
-      .maybeSingle();
+        if (sessionError) {
+          if (isSupabaseTransportError(sessionError)) throw sessionError;
+          return { status: 500 as const, body: { error: 'Could not verify session.' } };
+        }
 
-    if (sessionError) {
-      console.error('[Supabase Session Error]:', sessionError);
-      return res.status(500).json({ error: 'Could not verify session.' });
+        if (!session) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Invalid token',
+              message: 'Authentication could not be verified.',
+              code: 'INVALID_TOKEN',
+            },
+          };
+        }
+
+        if (Number(session.expires_at) < Date.now()) {
+          await supabase.from('sessions').delete().eq('token', token);
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Session expired',
+              message: 'Your session has expired. Please log in again.',
+              code: 'SESSION_EXPIRED',
+            },
+          };
+        }
+
+        const { data: row, error: userError } = await supabase
+          .from('users')
+          .select('id,email,phone,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
+          .eq('id', session.user_id)
+          .maybeSingle();
+
+        if (userError) {
+          if (isSupabaseTransportError(userError)) throw userError;
+          return { status: 500 as const, body: { error: 'Could not verify account.' } };
+        }
+
+        if (!row) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Account inactive',
+              message: 'Contact support for assistance.',
+              code: 'ACCOUNT_INACTIVE',
+            },
+          };
+        }
+
+        return { status: 200 as const, user: userFromRow(row) };
+      },
+      () => {
+        const session = localFallbackStore.findSession(token!);
+        if (!session) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Invalid token',
+              message: 'Authentication could not be verified.',
+              code: 'INVALID_TOKEN',
+            },
+          };
+        }
+        if (Number(session.expires_at) < Date.now()) {
+          localFallbackStore.deleteSession(token!);
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Session expired',
+              message: 'Your session has expired. Please log in again.',
+              code: 'SESSION_EXPIRED',
+            },
+          };
+        }
+        const row = localFallbackStore.findUserById(session.user_id);
+        if (!row) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Account inactive',
+              message: 'Contact support for assistance.',
+              code: 'ACCOUNT_INACTIVE',
+            },
+          };
+        }
+        return { status: 200 as const, user: userFromRow(row) };
+      }
+    );
+
+    if (authResult.status !== 200) {
+      return res.status(authResult.status).json(authResult.body);
     }
 
-    if (!session) {
-      return res.status(401).json({
-        error: 'Invalid token',
-        message: 'Authentication could not be verified.',
-        code: 'INVALID_TOKEN',
-      });
-    }
-
-    if (Number(session.expires_at) < Date.now()) {
-      await supabase.from('sessions').delete().eq('token', token);
-
-      return res.status(401).json({
-        error: 'Session expired',
-        message: 'Your session has expired. Please log in again.',
-        code: 'SESSION_EXPIRED',
-      });
-    }
-
-    const { data: row, error: userError } = await supabase
-      .from('users')
-      .select('id,email,phone,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
-      .eq('id', session.user_id)
-      .maybeSingle();
-
-    if (userError) {
-      console.error('[Supabase User Error]:', userError);
-      return res.status(500).json({ error: 'Could not verify account.' });
-    }
-
-    if (!row) {
-      return res.status(401).json({
-        error: 'Account inactive',
-        message: 'Contact support for assistance.',
-        code: 'ACCOUNT_INACTIVE',
-      });
-    }
-
-    const user: UserRecord = userFromRow(row);
-
-    req.user = user;
+    req.user = authResult.user;
     req.sessionToken = token;
 
     return next();
   } catch (err) {
-    console.error('[Supabase Authentication Error]:', err);
+    console.error('[Authentication Error]:', err);
     return res.status(500).json({ error: 'Authentication service unavailable.' });
   }
 }
@@ -503,38 +581,13 @@ app.post(
         return res.status(400).json({ error: 'Passwords do not match.' });
       }
 
-      const supabase = getSupabaseClient();
-
-      const { data: existingEmail } = await supabase
-        .from('users')
-        .select('id')
-        .eq('email', normEmail)
-        .maybeSingle();
-
-      if (existingEmail) {
-        return res.status(409).json({
-          error: 'An account with this email address already exists.',
-        });
-      }
-
-      const { data: existingPhone } = await supabase
-        .from('users')
-        .select('id')
-        .eq('phone', normPhone)
-        .maybeSingle();
-
-      if (existingPhone) {
-        return res.status(409).json({
-          error: 'An account with this phone number already exists.',
-        });
-      }
-
       const salt = crypto.randomBytes(16).toString('hex');
       const passwordHash = hashPassword(password, salt);
       const emailOtp = generateSecureOtp();
       const phoneOtp = generateSecureOtp();
       const now = Date.now();
       const otpExpiry = now + 15 * 60 * 1000;
+      const sessionToken = generateToken();
 
       const newUser: UserRecord = {
         id: `usr_${crypto.randomUUID()}`,
@@ -555,59 +608,170 @@ app.post(
         country: 'International',
       };
 
-      const { error: userError } = await supabase.from('users').insert({
-        id: newUser.id,
-        email: newUser.email,
-        phone: newUser.phone,
-        password_hash: newUser.passwordHash,
-        salt: newUser.salt,
-        role: 'user',
-        created_at: newUser.createdAt,
-        email_verified: false,
-        phone_verified: false,
-        email_verification_code: emailOtp,
-        email_verification_expires: otpExpiry,
-        phone_verification_code: phoneOtp,
-        phone_verification_expires: otpExpiry,
-        demo_balance: newUser.demoBalance,
-        real_balance: newUser.realBalance,
-        full_name: newUser.fullName,
-        country: newUser.country,
-      });
+      const regResult = await withStoreFallback(
+        async () => {
+          const supabase = getSupabaseClient();
 
-      if (userError) {
-        console.error('[Supabase Registration Error]:', userError);
+          const { data: existingEmail, error: emailLookupErr } = await supabase
+            .from('users')
+            .select('id')
+            .eq('email', normEmail)
+            .maybeSingle();
 
-        if (userError.code === '23505') {
-          return res.status(409).json({
-            error: 'An account with this email address or phone number already exists.',
-            message: 'An account with this email address or phone number already exists.',
+          if (emailLookupErr && isSupabaseTransportError(emailLookupErr)) {
+            throw emailLookupErr;
+          }
+          if (existingEmail) {
+            return {
+              status: 409 as const,
+              body: {
+                error: 'An account with this email address already exists.',
+                message: 'An account with this email address already exists.',
+              },
+            };
+          }
+
+          const { data: existingPhone, error: phoneLookupErr } = await supabase
+            .from('users')
+            .select('id')
+            .eq('phone', normPhone)
+            .maybeSingle();
+
+          if (phoneLookupErr && isSupabaseTransportError(phoneLookupErr)) {
+            throw phoneLookupErr;
+          }
+          if (existingPhone) {
+            return {
+              status: 409 as const,
+              body: {
+                error: 'An account with this phone number already exists.',
+                message: 'An account with this phone number already exists.',
+              },
+            };
+          }
+
+          const { error: userError } = await supabase.from('users').insert({
+            id: newUser.id,
+            email: newUser.email,
+            phone: newUser.phone,
+            password_hash: newUser.passwordHash,
+            salt: newUser.salt,
+            role: 'user',
+            created_at: newUser.createdAt,
+            email_verified: false,
+            phone_verified: false,
+            email_verification_code: emailOtp,
+            email_verification_expires: otpExpiry,
+            phone_verification_code: phoneOtp,
+            phone_verification_expires: otpExpiry,
+            demo_balance: newUser.demoBalance,
+            real_balance: newUser.realBalance,
+            full_name: newUser.fullName,
+            country: newUser.country,
           });
+
+          if (userError) {
+            if (isSupabaseTransportError(userError)) throw userError;
+            console.error('[Supabase Registration Error]:', userError);
+
+            if (userError.code === '23505') {
+              return {
+                status: 409 as const,
+                body: {
+                  error: 'An account with this email address or phone number already exists.',
+                  message: 'An account with this email address or phone number already exists.',
+                },
+              };
+            }
+
+            return {
+              status: 500 as const,
+              body: {
+                error: 'Could not create your account.',
+                message: 'Could not create your account.',
+              },
+            };
+          }
+
+          const { error: sessionError } = await supabase.from('sessions').insert({
+            token: sessionToken,
+            user_id: newUser.id,
+            created_at: now,
+            expires_at: now + 7 * 24 * 60 * 60 * 1000,
+          });
+
+          if (sessionError) {
+            if (isSupabaseTransportError(sessionError)) throw sessionError;
+            console.error('[Supabase Registration Session Error]:', sessionError);
+            await supabase.from('users').delete().eq('id', newUser.id);
+
+            return {
+              status: 500 as const,
+              body: {
+                error: 'Your account was created, but we could not start your session. Please try logging in.',
+                message: 'Your account was created, but we could not start your session. Please try logging in.',
+              },
+            };
+          }
+
+          return { status: 201 as const };
+        },
+        () => {
+          if (localFallbackStore.findUserByEmail(normEmail)) {
+            return {
+              status: 409 as const,
+              body: {
+                error: 'An account with this email address already exists.',
+                message: 'An account with this email address already exists.',
+              },
+            };
+          }
+          if (localFallbackStore.findUserByPhone(normPhone)) {
+            return {
+              status: 409 as const,
+              body: {
+                error: 'An account with this phone number already exists.',
+                message: 'An account with this phone number already exists.',
+              },
+            };
+          }
+          const { error: userError } = localFallbackStore.insertUser({
+            id: newUser.id,
+            email: newUser.email,
+            phone: newUser.phone,
+            password_hash: newUser.passwordHash,
+            salt: newUser.salt,
+            role: 'user',
+            created_at: newUser.createdAt,
+            email_verified: false,
+            phone_verified: false,
+            email_verification_code: emailOtp,
+            email_verification_expires: otpExpiry,
+            phone_verification_code: phoneOtp,
+            phone_verification_expires: otpExpiry,
+            demo_balance: newUser.demoBalance,
+            real_balance: newUser.realBalance,
+            full_name: newUser.fullName || null,
+            country: newUser.country || 'International',
+          });
+          if (userError) {
+            return {
+              status: 409 as const,
+              body: { error: userError.message, message: userError.message },
+            };
+          }
+          localFallbackStore.insertSession({
+            token: sessionToken,
+            user_id: newUser.id,
+            created_at: now,
+            expires_at: now + 7 * 24 * 60 * 60 * 1000,
+          });
+          return { status: 201 as const };
         }
+      );
 
-        return res.status(500).json({
-          error: 'Could not create your account.',
-          message: 'Could not create your account.',
-        });
-      }
-
-      const sessionToken = generateToken();
-
-      const { error: sessionError } = await supabase.from('sessions').insert({
-        token: sessionToken,
-        user_id: newUser.id,
-        created_at: now,
-        expires_at: now + 7 * 24 * 60 * 60 * 1000,
-      });
-
-      if (sessionError) {
-        console.error('[Supabase Registration Session Error]:', sessionError);
-        await supabase.from('users').delete().eq('id', newUser.id);
-
-        return res.status(500).json({
-          error: 'Your account was created, but we could not start your session. Please try logging in.',
-          message: 'Your account was created, but we could not start your session. Please try logging in.',
-        });
+      if (regResult.status !== 201) {
+        return res.status(regResult.status).json(regResult.body);
       }
 
       setSessionCookie(res, sessionToken);
@@ -633,7 +797,7 @@ app.post(
         balances: { demo: newUser.demoBalance, real: newUser.realBalance },
       });
     } catch (err) {
-      console.error('[Supabase Registration Error]:', err);
+      console.error('[Registration Error]:', err);
       return res.status(500).json({ error: 'Registration service is unavailable.' });
     }
   }
@@ -707,23 +871,45 @@ app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request,
     const identifier = rawId.trim();
     const isEmail = identifier.includes('@');
     const normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
-    const supabase = getSupabaseClient();
-    const { data: row, error } = await supabase.from('users').select('*')
-      .eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
-    if (error) throw error;
-    if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
+    const now = Date.now(), token = generateToken();
+
+    const loginResult = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: row, error } = await supabase.from('users').select('*')
+          .eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        if (error) throw error;
+        if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
+          return { status: 401 as const };
+        }
+        const { error: sessionError } = await supabase.from('sessions').insert({
+          token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
+        });
+        if (sessionError) throw sessionError;
+        return { status: 200 as const, row };
+      },
+      () => {
+        const row = isEmail
+          ? localFallbackStore.findUserByEmail(normalized)
+          : localFallbackStore.findUserByPhone(normalized);
+        if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
+          return { status: 401 as const };
+        }
+        localFallbackStore.insertSession({
+          token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
+        });
+        return { status: 200 as const, row };
+      }
+    );
+
+    if (loginResult.status !== 200) {
       return res.status(401).json({
         error: 'Invalid email, phone, or password.',
         message: 'Invalid email, phone, or password.',
       });
     }
-    const now = Date.now(), token = generateToken();
-    const { error: sessionError } = await supabase.from('sessions').insert({
-      token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
-    });
-    if (sessionError) throw sessionError;
     setSessionCookie(res, token);
-    const user = userFromRow(row);
+    const user = userFromRow(loginResult.row);
     const safeUser = safeUserResponse(user);
     return res.json({
       success: true,
@@ -733,7 +919,7 @@ app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request,
       balances: { demo: safeUser.demoBalance, real: safeUser.realBalance },
     });
   } catch (error) {
-    console.error('[Supabase Login Error]:', error);
+    console.error('[Login Error]:', error);
     return res.status(500).json({
       error: 'Login service is unavailable.',
       message: 'Login service is unavailable.',
@@ -744,12 +930,19 @@ app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request,
 // 3. LOGOUT
 app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { error } = await getSupabaseClient().from('sessions').delete().eq('token', req.sessionToken);
-    if (error) throw error;
+    await withStoreFallback(
+      async () => {
+        const { error } = await getSupabaseClient().from('sessions').delete().eq('token', req.sessionToken);
+        if (error) throw error;
+      },
+      () => {
+        if (req.sessionToken) localFallbackStore.deleteSession(req.sessionToken);
+      }
+    );
     clearSessionCookie(res);
     return res.json({ message: 'Logged out successfully.' });
   } catch (error) {
-    console.error('[Supabase Logout Error]:', error);
+    console.error('[Logout Error]:', error);
     return res.status(500).json({ error: 'Could not log out. Please try again.' });
   }
 });
@@ -775,11 +968,17 @@ async function verifyContact(req: AuthenticatedRequest, res: Response, type: 'em
     const patch = isEmail
       ? { email_verified: true, email_verification_code: null, email_verification_expires: null }
       : { phone_verified: true, phone_verification_code: null, phone_verification_expires: null };
-    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
-    if (error) throw error;
+    const data = await withStoreFallback(
+      async () => {
+        const { data: row, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
+        if (error) throw error;
+        return row;
+      },
+      () => localFallbackStore.updateUser(user.id, patch)
+    );
     return res.json({ message: `${type === 'email' ? 'Email' : 'Phone number'} verified successfully!`, user: safeUserResponse(userFromRow(data)) });
   } catch (error) {
-    console.error('[Supabase Verification Error]:', error);
+    console.error('[Verification Error]:', error);
     return res.status(500).json({ error: 'Verification service is unavailable.' });
   }
 }
@@ -798,8 +997,14 @@ app.post('/api/auth/resend-code', requireAuth, rateLimitMiddleware(5, 60000), as
     const patch = type === 'phone'
       ? { phone_verification_code: otp, phone_verification_expires: expiry }
       : { email_verification_code: otp, email_verification_expires: expiry };
-    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
-    if (error) throw error;
+    const data = await withStoreFallback(
+      async () => {
+        const { data: row, error } = await getSupabaseClient().from('users').update(patch).eq('id', user.id).select('*').single();
+        if (error) throw error;
+        return row;
+      },
+      () => localFallbackStore.updateUser(user.id, patch)
+    );
     const updated = userFromRow(data);
     await dispatchVerificationCodes(updated, type === 'email' ? otp : undefined, type === 'phone' ? otp : undefined);
     return res.json({
@@ -808,7 +1013,7 @@ app.post('/api/auth/resend-code', requireAuth, rateLimitMiddleware(5, 60000), as
         type === 'phone' && process.env.NODE_ENV !== 'production' ? otp : undefined),
     });
   } catch (error) {
-    console.error('[Supabase Resend Error]:', error);
+    console.error('[Resend Error]:', error);
     return res.status(500).json({ error: 'Could not generate a new verification code.' });
   }
 });
@@ -819,19 +1024,34 @@ app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req:
     const identifier = req.body?.identifier;
     if (typeof identifier !== 'string' || !identifier.trim()) return res.status(400).json({ error: 'Please provide your registered email or phone number.' });
     const isEmail = identifier.trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
-    const supabase = getSupabaseClient();
-    const { data: row, error } = await supabase.from('users').select('id').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
-    if (error) throw error;
     const generic = 'If an account matches that contact method, a verification code has been dispatched.';
-    if (!row) return res.json({ message: generic });
     const otp = generateSecureOtp(), expiry = Date.now() + 30 * 60 * 1000;
-    const { data: resetUserRow, error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id).select('*').single();
-    if (updateError) throw updateError;
+
+    const resetUserRow = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: row, error } = await supabase.from('users').select('id').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        if (error) throw error;
+        if (!row) return null;
+        const { data: updatedRow, error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id).select('*').single();
+        if (updateError) throw updateError;
+        return updatedRow;
+      },
+      () => {
+        const row = isEmail
+          ? localFallbackStore.findUserByEmail(normalized)
+          : localFallbackStore.findUserByPhone(normalized);
+        if (!row) return null;
+        return localFallbackStore.updateUser(row.id, { reset_password_token: otp, reset_password_expires: expiry });
+      }
+    );
+
+    if (!resetUserRow) return res.json({ message: generic });
     await dispatchPasswordReset(userFromRow(resetUserRow), isEmail, otp);
     // OTP is returned only in development; production codes are delivered out-of-band.
     return res.json({ message: generic, ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}) });
   } catch (error) {
-    console.error('[Supabase Forgot Password Error]:', error);
+    console.error('[Forgot Password Error]:', error);
     return res.status(500).json({ error: 'Password reset service is unavailable.' });
   }
 });
@@ -845,23 +1065,46 @@ app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req:
     if (!passCheck.isValid) return res.status(400).json({ error: passCheck.message });
     if (confirmPassword && newPassword !== confirmPassword) return res.status(400).json({ error: 'Passwords do not match.' });
     const isEmail = String(identifier).trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
-    const supabase = getSupabaseClient();
-    const { data: row, error } = await supabase.from('users').select('*').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
-    if (error) throw error;
-    if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
-      return res.status(400).json({ error: 'Invalid or expired password reset code.' });
-    }
     const salt = crypto.randomBytes(16).toString('hex');
     const passwordHash = hashPassword(newPassword, salt);
-    const { error: updateError } = await supabase.from('users').update({
-      salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
-    }).eq('id', row.id);
-    if (updateError) throw updateError;
-    const { error: sessionError } = await supabase.from('sessions').delete().eq('user_id', row.id);
-    if (sessionError) throw sessionError;
+
+    const ok = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: row, error } = await supabase.from('users').select('*').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        if (error) throw error;
+        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
+          return false;
+        }
+        const { error: updateError } = await supabase.from('users').update({
+          salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
+        }).eq('id', row.id);
+        if (updateError) throw updateError;
+        const { error: sessionError } = await supabase.from('sessions').delete().eq('user_id', row.id);
+        if (sessionError) throw sessionError;
+        return true;
+      },
+      () => {
+        const row = isEmail
+          ? localFallbackStore.findUserByEmail(normalized)
+          : localFallbackStore.findUserByPhone(normalized);
+        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
+          return false;
+        }
+        localFallbackStore.updateUser(row.id, {
+          salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
+        });
+        localFallbackStore.deleteSessionsByUser(row.id);
+        return true;
+      }
+    );
+
+    if (!ok) {
+      return res.status(400).json({ error: 'Invalid or expired password reset code.' });
+    }
     return res.json({ message: 'Password has been reset successfully. Please log in with your new password.' });
   } catch (error) {
-    console.error('[Supabase Reset Password Error]:', error);
+    console.error('[Reset Password Error]:', error);
     return res.status(500).json({ error: 'Password reset service is unavailable.' });
   }
 });
@@ -875,11 +1118,17 @@ app.put('/api/user/profile', requireAuth, async (req: AuthenticatedRequest, res:
     if (req.body.soundEnabled !== undefined) patch.sound_enabled = Boolean(req.body.soundEnabled);
     if (req.body.theme !== undefined) patch.theme = String(req.body.theme).trim();
     if (!Object.keys(patch).length) return res.json({ message: 'Profile unchanged.', user: safeUserResponse(req.user!) });
-    const { data, error } = await getSupabaseClient().from('users').update(patch).eq('id', req.user!.id).select('*').single();
-    if (error) throw error;
+    const data = await withStoreFallback(
+      async () => {
+        const { data: row, error } = await getSupabaseClient().from('users').update(patch).eq('id', req.user!.id).select('*').single();
+        if (error) throw error;
+        return row;
+      },
+      () => localFallbackStore.updateUser(req.user!.id, patch)
+    );
     return res.json({ message: 'Profile updated.', user: safeUserResponse(userFromRow(data)) });
   } catch (error) {
-    console.error('[Supabase Profile Error]:', error);
+    console.error('[Profile Error]:', error);
     return res.status(500).json({ error: 'Could not update profile.' });
   }
 });
@@ -887,12 +1136,18 @@ app.put('/api/user/profile', requireAuth, async (req: AuthenticatedRequest, res:
 // 11. USER TRADES
 app.get('/api/user/trades', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { data, error } = await getSupabaseClient().from('trades').select('trade_data')
-      .eq('user_id', req.user!.id).order('recorded_at', { ascending: false }).limit(50);
-    if (error) throw error;
-    return res.json({ trades: (data || []).map((row: any) => row.trade_data) });
+    const trades = await withStoreFallback(
+      async () => {
+        const { data, error } = await getSupabaseClient().from('trades').select('trade_data')
+          .eq('user_id', req.user!.id).order('recorded_at', { ascending: false }).limit(50);
+        if (error) throw error;
+        return (data || []).map((row: any) => row.trade_data);
+      },
+      () => localFallbackStore.listTradesByUser(req.user!.id, 50)
+    );
+    return res.json({ trades });
   } catch (error) {
-    console.error('[Supabase Trades Read Error]:', error);
+    console.error('[Trades Read Error]:', error);
     return res.status(500).json({ error: 'Could not load trade history.' });
   }
 });
@@ -912,23 +1167,49 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(30, 60000), 
       || trade.durationTicks < 1 || trade.durationTicks > 10000) {
       return res.status(400).json({ error: 'Invalid simulated trade details.' });
     }
-    const { data, error } = await getSupabaseClient().rpc('place_simulated_trade', {
-      p_user_id: req.user!.id,
-      p_trade: trade,
-      p_mode: mode,
-      p_stake: trade.stake,
-    });
-    if (error) {
-      if (/Insufficient balance/i.test(error.message)) return res.status(409).json({ error: 'Insufficient balance.' });
-      if (/already exists/i.test(error.message)) return res.status(409).json({ error: 'This trade has already been placed.' });
-      throw error;
+    const result = await withStoreFallback(
+      async () => {
+        const { data, error } = await getSupabaseClient().rpc('place_simulated_trade', {
+          p_user_id: req.user!.id,
+          p_trade: trade,
+          p_mode: mode,
+          p_stake: trade.stake,
+        });
+        if (error) {
+          if (isSupabaseTransportError(error)) throw error;
+          if (/Insufficient balance/i.test(error.message)) return { status: 409 as const, error: 'Insufficient balance.' };
+          if (/already exists/i.test(error.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
+          throw error;
+        }
+        const { data: userRow, error: userError } = await getSupabaseClient()
+          .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+        if (userError) throw userError;
+        return {
+          status: 201 as const,
+          balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
+          wallet: data,
+        };
+      },
+      () => {
+        try {
+          const wallet = localFallbackStore.placeSimulatedTrade(req.user!.id, trade, mode, trade.stake);
+          const u = localFallbackStore.findUserById(req.user!.id)!;
+          return {
+            status: 201 as const,
+            balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
+            wallet,
+          };
+        } catch (err: any) {
+          if (/Insufficient balance/i.test(err.message)) return { status: 409 as const, error: 'Insufficient balance.' };
+          if (/already exists/i.test(err.message)) return { status: 409 as const, error: 'This trade has already been placed.' };
+          throw err;
+        }
+      }
+    );
+    if (result.status !== 201) {
+      return res.status(result.status).json({ error: result.error });
     }
-    const { data: userRow, error: userError } = await getSupabaseClient()
-      .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
-    if (userError) throw userError;
-    return res.status(201).json({ success: true, trade, balances: {
-      demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance),
-    }, wallet: data });
+    return res.status(201).json({ success: true, trade, balances: result.balances, wallet: result.wallet });
   } catch (error) {
     console.error('[Simulated Trade Placement Error]:', error);
     return res.status(500).json({ error: 'Could not place simulated trade.' });
@@ -947,22 +1228,48 @@ app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(60
       || !Array.isArray(settlement.ticksRecorded) || settlement.ticksRecorded.length > 10000) {
       return res.status(400).json({ error: 'Invalid simulated settlement details.' });
     }
-    const { data, error } = await getSupabaseClient().rpc('settle_simulated_trade', {
-      p_user_id: req.user!.id,
-      p_trade_id: tradeId,
-      p_settlement: settlement,
-    });
-    if (error) {
-      if (/not found/i.test(error.message)) return res.status(404).json({ error: 'Trade not found.' });
-      if (/already settled/i.test(error.message)) return res.status(409).json({ error: 'Trade has already been settled.' });
-      throw error;
+    const result = await withStoreFallback(
+      async () => {
+        const { data, error } = await getSupabaseClient().rpc('settle_simulated_trade', {
+          p_user_id: req.user!.id,
+          p_trade_id: tradeId,
+          p_settlement: settlement,
+        });
+        if (error) {
+          if (isSupabaseTransportError(error)) throw error;
+          if (/not found/i.test(error.message)) return { status: 404 as const, error: 'Trade not found.' };
+          if (/already settled/i.test(error.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
+          throw error;
+        }
+        const { data: userRow, error: userError } = await getSupabaseClient()
+          .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
+        if (userError) throw userError;
+        return {
+          status: 200 as const,
+          balances: { demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance) },
+          wallet: data,
+        };
+      },
+      () => {
+        try {
+          const wallet = localFallbackStore.settleSimulatedTrade(req.user!.id, tradeId, settlement);
+          const u = localFallbackStore.findUserById(req.user!.id)!;
+          return {
+            status: 200 as const,
+            balances: { demoBalance: Number(u.demo_balance), realBalance: Number(u.real_balance) },
+            wallet,
+          };
+        } catch (err: any) {
+          if (/not found/i.test(err.message)) return { status: 404 as const, error: 'Trade not found.' };
+          if (/already settled/i.test(err.message)) return { status: 409 as const, error: 'Trade has already been settled.' };
+          throw err;
+        }
+      }
+    );
+    if (result.status !== 200) {
+      return res.status(result.status).json({ error: result.error });
     }
-    const { data: userRow, error: userError } = await getSupabaseClient()
-      .from('users').select('demo_balance,real_balance').eq('id', req.user!.id).single();
-    if (userError) throw userError;
-    return res.json({ success: true, balances: {
-      demoBalance: Number(userRow.demo_balance), realBalance: Number(userRow.real_balance),
-    }, wallet: data });
+    return res.json({ success: true, balances: result.balances, wallet: result.wallet });
   } catch (error) {
     console.error('[Simulated Trade Settlement Error]:', error);
     return res.status(500).json({ error: 'Could not settle simulated trade.' });
@@ -974,13 +1281,22 @@ app.post('/api/user/trades', requireAuth, rateLimitMiddleware(60, 60000), async 
     const trade = req.body;
     if (!trade || typeof trade !== 'object' || typeof trade.id !== 'string' || !trade.id.trim() || trade.id.length > 128) return res.status(400).json({ error: 'Invalid trade payload' });
     const saved = { ...trade, userId: req.user!.id, recordedAt: Date.now() };
-    const { error } = await getSupabaseClient().from('trades').insert({
-      id: String(saved.id), user_id: req.user!.id, trade_data: saved, recorded_at: saved.recordedAt,
-    });
-    if (error) throw error;
+    await withStoreFallback(
+      async () => {
+        const { error } = await getSupabaseClient().from('trades').insert({
+          id: String(saved.id), user_id: req.user!.id, trade_data: saved, recorded_at: saved.recordedAt,
+        });
+        if (error) throw error;
+      },
+      () => {
+        localFallbackStore.insertTrade({
+          id: String(saved.id), user_id: req.user!.id, trade_data: saved, recorded_at: saved.recordedAt,
+        });
+      }
+    );
     return res.status(201).json({ message: 'Trade saved', trade: saved });
   } catch (error) {
-    console.error('[Supabase Trade Save Error]:', error);
+    console.error('[Trade Save Error]:', error);
     return res.status(500).json({ error: 'Could not save trade.' });
   }
 });
@@ -990,40 +1306,64 @@ app.post('/api/user/trades', requireAuth, rateLimitMiddleware(60, 60000), async 
 // ─────────────────────────────────────────────────────────────
 app.get('/api/admin/overview', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const supabase = getSupabaseClient();
-    const [usersResult, verifiedResult, adminsResult, sessionsResult, tradesResult] = await Promise.all([
-      supabase.from('users').select('id', { count: 'exact', head: true }),
-      supabase.from('users').select('id', { count: 'exact', head: true }).eq('email_verified', true).eq('phone_verified', true),
-      supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin'),
-      supabase.from('sessions').select('token', { count: 'exact', head: true }).gt('expires_at', Date.now()),
-      supabase.from('trades').select('trade_data'),
-    ]);
-    const queryError = usersResult.error || verifiedResult.error || adminsResult.error || sessionsResult.error || tradesResult.error;
-    if (queryError) throw queryError;
-    const trades = (tradesResult.data || []).map((x: any) => x.trade_data || {});
-    return res.json({ metrics: {
-      totalUsers: usersResult.count || 0,
-      verifiedUsers: verifiedResult.count || 0,
-      activeSessions: sessionsResult.count || 0,
-      totalTrades: trades.length,
-      totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
-      netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profitLoss ?? t.profit) || 0), 0).toFixed(2)),
-      adminsCount: adminsResult.count || 0,
-    }, defaultAccounts: []});
+    const overview = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const [usersResult, verifiedResult, adminsResult, sessionsResult, tradesResult] = await Promise.all([
+          supabase.from('users').select('id', { count: 'exact', head: true }),
+          supabase.from('users').select('id', { count: 'exact', head: true }).eq('email_verified', true).eq('phone_verified', true),
+          supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin'),
+          supabase.from('sessions').select('token', { count: 'exact', head: true }).gt('expires_at', Date.now()),
+          supabase.from('trades').select('trade_data'),
+        ]);
+        const queryError = usersResult.error || verifiedResult.error || adminsResult.error || sessionsResult.error || tradesResult.error;
+        if (queryError) throw queryError;
+        const trades = (tradesResult.data || []).map((x: any) => x.trade_data || {});
+        return {
+          totalUsers: usersResult.count || 0,
+          verifiedUsers: verifiedResult.count || 0,
+          activeSessions: sessionsResult.count || 0,
+          totalTrades: trades.length,
+          totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
+          netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profitLoss ?? t.profit) || 0), 0).toFixed(2)),
+          adminsCount: adminsResult.count || 0,
+        };
+      },
+      () => {
+        const users = localFallbackStore.listUsers();
+        const trades = localFallbackStore.listAllTrades();
+        return {
+          totalUsers: users.length,
+          verifiedUsers: users.filter((u) => u.email_verified && u.phone_verified).length,
+          activeSessions: localFallbackStore.countActiveSessions(Date.now()),
+          totalTrades: trades.length,
+          totalVolume: Number(trades.reduce((n: number, t: any) => n + (Number(t.stake) || 0), 0).toFixed(2)),
+          netProfitLoss: Number(trades.reduce((n: number, t: any) => n + (Number(t.profitLoss ?? t.profit) || 0), 0).toFixed(2)),
+          adminsCount: users.filter((u) => u.role === 'admin').length,
+        };
+      }
+    );
+    return res.json({ metrics: overview, defaultAccounts: [] });
   } catch (error) {
-    console.error('[Supabase Admin Overview Error]:', error);
+    console.error('[Admin Overview Error]:', error);
     return res.status(500).json({ error: 'Could not load administrator overview.' });
   }
 });
 app.get('/api/admin/users', requireAdmin, async (_req: AuthenticatedRequest, res: Response) => {
   try {
-    const { data, error } = await getSupabaseClient().from('users')
-      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
-      .order('created_at', { ascending: false });
-    if (error) throw error;
-    return res.json({ users: (data || []).map(adminUserResponse) });
+    const data = await withStoreFallback<any[]>(
+      async () => {
+        const { data: rows, error } = await getSupabaseClient().from('users')
+          .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+          .order('created_at', { ascending: false });
+        if (error) throw error;
+        return rows || [];
+      },
+      () => localFallbackStore.listUsers()
+    );
+    return res.json({ users: data.map(adminUserResponse) });
   } catch (error) {
-    console.error('[Supabase Admin Users Error]:', error);
+    console.error('[Admin Users Error]:', error);
     return res.status(500).json({ error: 'Could not load users.' });
   }
 });
@@ -1031,22 +1371,38 @@ app.post('/api/admin/users/:id/role', requireAdmin, async (req: AuthenticatedReq
   try {
     const role = req.body?.role;
     if (role !== 'admin' && role !== 'user') return res.status(400).json({ error: 'Role must be either "admin" or "user".' });
-    const supabase = getSupabaseClient();
-    const { data: target, error: findError } = await supabase.from('users')
-      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
-      .eq('id', req.params.id).maybeSingle();
-    if (findError) throw findError;
-    if (!target) return res.status(404).json({ error: 'Target user not found.' });
-    if (target.role === 'admin' && role === 'user') {
-      const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
-      if (error) throw error;
-      if ((count || 0) <= 1) return res.status(400).json({ error: 'Cannot demote the last remaining administrator.' });
-    }
-    const { data, error } = await supabase.from('users').update({ role }).eq('id', req.params.id).select('*').single();
-    if (error) throw error;
-    return res.json({ message: `User ${target.email} role updated to ${role}.`, user: adminUserResponse(data) });
+    const result = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: target, error: findError } = await supabase.from('users')
+          .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+          .eq('id', req.params.id).maybeSingle();
+        if (findError) throw findError;
+        if (!target) return { status: 404 as const, error: 'Target user not found.' };
+        if (target.role === 'admin' && role === 'user') {
+          const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
+          if (error) throw error;
+          if ((count || 0) <= 1) return { status: 400 as const, error: 'Cannot demote the last remaining administrator.' };
+        }
+        const { data, error } = await supabase.from('users').update({ role }).eq('id', req.params.id).select('*').single();
+        if (error) throw error;
+        return { status: 200 as const, email: target.email, user: data };
+      },
+      () => {
+        const target = localFallbackStore.findUserById(req.params.id);
+        if (!target) return { status: 404 as const, error: 'Target user not found.' };
+        if (target.role === 'admin' && role === 'user') {
+          const adminCount = localFallbackStore.listUsers().filter((u) => u.role === 'admin').length;
+          if (adminCount <= 1) return { status: 400 as const, error: 'Cannot demote the last remaining administrator.' };
+        }
+        const updated = localFallbackStore.updateUser(req.params.id, { role });
+        return { status: 200 as const, email: target.email, user: updated };
+      }
+    );
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    return res.json({ message: `User ${result.email} role updated to ${role}.`, user: adminUserResponse(result.user) });
   } catch (error) {
-    console.error('[Supabase Role Update Error]:', error);
+    console.error('[Role Update Error]:', error);
     return res.status(500).json({ error: 'Could not update user role.' });
   }
 });
@@ -1056,20 +1412,34 @@ app.post('/api/admin/users/:id/balance', requireAdmin, async (req: Authenticated
     const value = Number(amount);
     if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: 'Please specify a valid positive numerical amount.' });
     if (accountType !== 'real' && accountType !== 'demo') return res.status(400).json({ error: 'Account type must be real or demo.' });
-    const supabase = getSupabaseClient();
-    const { data: target, error: findError } = await supabase.from('users')
-      .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
-      .eq('id', req.params.id).maybeSingle();
-    if (findError) throw findError;
-    if (!target) return res.status(404).json({ error: 'Target user not found.' });
     const column = accountType === 'real' ? 'real_balance' : 'demo_balance';
-    const current = Number(target[column] || 0);
-    const updatedValue = operation === 'set' ? value : Math.max(0, current + value);
-    const { data, error } = await supabase.from('users').update({ [column]: updatedValue }).eq('id', req.params.id).select('*').single();
-    if (error) throw error;
-    return res.json({ message: `Account balance updated for ${target.email}.`, user: adminUserResponse(data) });
+    const result = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: target, error: findError } = await supabase.from('users')
+          .select('id,email,phone,role,created_at,email_verified,phone_verified,demo_balance,real_balance,full_name,country')
+          .eq('id', req.params.id).maybeSingle();
+        if (findError) throw findError;
+        if (!target) return { status: 404 as const, error: 'Target user not found.' };
+        const current = Number(target[column] || 0);
+        const updatedValue = operation === 'set' ? value : Math.max(0, current + value);
+        const { data, error } = await supabase.from('users').update({ [column]: updatedValue }).eq('id', req.params.id).select('*').single();
+        if (error) throw error;
+        return { status: 200 as const, email: target.email, user: data };
+      },
+      () => {
+        const target = localFallbackStore.findUserById(req.params.id);
+        if (!target) return { status: 404 as const, error: 'Target user not found.' };
+        const current = Number(target[column] || 0);
+        const updatedValue = operation === 'set' ? value : Math.max(0, current + value);
+        const updated = localFallbackStore.updateUser(req.params.id, { [column]: updatedValue });
+        return { status: 200 as const, email: target.email, user: updated };
+      }
+    );
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    return res.json({ message: `Account balance updated for ${result.email}.`, user: adminUserResponse(result.user) });
   } catch (error) {
-    console.error('[Supabase Balance Update Error]:', error);
+    console.error('[Balance Update Error]:', error);
     return res.status(500).json({ error: 'Could not update user balance.' });
   }
 });
@@ -1081,58 +1451,100 @@ app.post('/api/admin/create-admin', requireAdmin, async (req: AuthenticatedReque
     if (!validateEmail(normalizedEmail)) return res.status(400).json({ error: 'Please enter a valid email address.' });
     const passCheck = validatePasswordSecurity(password);
     if (!passCheck.isValid) return res.status(400).json({ error: passCheck.message });
-    const supabase = getSupabaseClient();
-    const { data: existing, error: findError } = await supabase.from('users').select('*').eq('email', normalizedEmail).maybeSingle();
-    if (findError) throw findError;
-    if (existing) {
-      const { data, error } = await supabase.from('users').update({ role: 'admin', email_verified: true, phone_verified: true }).eq('id', existing.id).select('*').single();
-      if (error) throw error;
-      return res.json({ message: `Existing user ${normalizedEmail} promoted to administrator.`, user: safeUserResponse(userFromRow(data)) });
-    }
-    if (!normalizedPhone || !validatePhone(normalizedPhone)) return res.status(400).json({ error: 'A valid international phone number is required for a new administrator.' });
     const salt = crypto.randomBytes(16).toString('hex'), now = Date.now();
-    const newAdmin: UserRecord = {
-      id: `admin_${crypto.randomUUID()}`, email: normalizedEmail, phone: normalizedPhone,
-      passwordHash: hashPassword(password, salt), salt, role: 'admin', createdAt: now,
-      emailVerified: true, phoneVerified: true, demoBalance: 10000, realBalance: 0,
-      fullName: fullName || 'DevOptions Administrator', country: 'International',
-    };
-    const { error } = await supabase.from('users').insert(userToRow(newAdmin));
-    if (error) {
-      if (error.code === '23505') return res.status(409).json({ error: 'An account with this email or phone already exists.' });
-      throw error;
-    }
-    return res.status(201).json({ message: 'New administrator account created successfully.', user: safeUserResponse(newAdmin) });
+
+    const result = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: existing, error: findError } = await supabase.from('users').select('*').eq('email', normalizedEmail).maybeSingle();
+        if (findError) throw findError;
+        if (existing) {
+          const { data, error } = await supabase.from('users').update({ role: 'admin', email_verified: true, phone_verified: true }).eq('id', existing.id).select('*').single();
+          if (error) throw error;
+          return { status: 200 as const, message: `Existing user ${normalizedEmail} promoted to administrator.`, user: safeUserResponse(userFromRow(data)) };
+        }
+        if (!normalizedPhone || !validatePhone(normalizedPhone)) return { status: 400 as const, error: 'A valid international phone number is required for a new administrator.' };
+        const newAdmin: UserRecord = {
+          id: `admin_${crypto.randomUUID()}`, email: normalizedEmail, phone: normalizedPhone,
+          passwordHash: hashPassword(password, salt), salt, role: 'admin', createdAt: now,
+          emailVerified: true, phoneVerified: true, demoBalance: 10000, realBalance: 0,
+          fullName: fullName || 'DevOptions Administrator', country: 'International',
+        };
+        const { error } = await supabase.from('users').insert(userToRow(newAdmin));
+        if (error) {
+          if (isSupabaseTransportError(error)) throw error;
+          if (error.code === '23505') return { status: 409 as const, error: 'An account with this email or phone already exists.' };
+          throw error;
+        }
+        return { status: 201 as const, message: 'New administrator account created successfully.', user: safeUserResponse(newAdmin) };
+      },
+      () => {
+        const existing = localFallbackStore.findUserByEmail(normalizedEmail);
+        if (existing) {
+          const updated = localFallbackStore.updateUser(existing.id, { role: 'admin', email_verified: true, phone_verified: true })!;
+          return { status: 200 as const, message: `Existing user ${normalizedEmail} promoted to administrator.`, user: safeUserResponse(userFromRow(updated)) };
+        }
+        if (!normalizedPhone || !validatePhone(normalizedPhone)) return { status: 400 as const, error: 'A valid international phone number is required for a new administrator.' };
+        const newAdmin: UserRecord = {
+          id: `admin_${crypto.randomUUID()}`, email: normalizedEmail, phone: normalizedPhone,
+          passwordHash: hashPassword(password, salt), salt, role: 'admin', createdAt: now,
+          emailVerified: true, phoneVerified: true, demoBalance: 10000, realBalance: 0,
+          fullName: fullName || 'DevOptions Administrator', country: 'International',
+        };
+        const { error } = localFallbackStore.insertUser(userToRow(newAdmin) as any);
+        if (error) return { status: 409 as const, error: 'An account with this email or phone already exists.' };
+        return { status: 201 as const, message: 'New administrator account created successfully.', user: safeUserResponse(newAdmin) };
+      }
+    );
+    if (result.status !== 200 && result.status !== 201) return res.status(result.status).json({ error: result.error });
+    return res.status(result.status).json({ message: result.message, user: result.user });
   } catch (error) {
-    console.error('[Supabase Create Admin Error]:', error);
+    console.error('[Create Admin Error]:', error);
     return res.status(500).json({ error: 'Could not create administrator account.' });
   }
 });
 app.delete('/api/admin/users/:id', requireAdmin, async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (req.user!.id === req.params.id) return res.status(400).json({ error: 'Administrators cannot delete their own active account.' });
-    const supabase = getSupabaseClient();
-    const { data: target, error: findError } = await supabase.from('users').select('id,email,role').eq('id', req.params.id).maybeSingle();
-    if (findError) throw findError;
-    if (!target) return res.status(404).json({ error: 'User not found.' });
-    if (target.role === 'admin') {
-      const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
-      if (error) throw error;
-      if ((count || 0) <= 1) return res.status(400).json({ error: 'Cannot delete the last remaining administrator.' });
-    }
-    const { count: depositCount, error: depositCheckError } = await supabase
-      .from('deposits').select('id', { count: 'exact', head: true }).eq('user_id', req.params.id);
-    if (depositCheckError) throw depositCheckError;
-    if ((depositCount || 0) > 0) {
-      return res.status(409).json({
-        error: 'This account has payment records and cannot be deleted. Keep the account for financial audit history.',
-      });
-    }
-    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
-    if (error) throw error;
-    return res.json({ message: `User ${target.email} has been deleted.` });
+    const result = await withStoreFallback(
+      async () => {
+        const supabase = getSupabaseClient();
+        const { data: target, error: findError } = await supabase.from('users').select('id,email,role').eq('id', req.params.id).maybeSingle();
+        if (findError) throw findError;
+        if (!target) return { status: 404 as const, error: 'User not found.' };
+        if (target.role === 'admin') {
+          const { count, error } = await supabase.from('users').select('id', { count: 'exact', head: true }).eq('role', 'admin');
+          if (error) throw error;
+          if ((count || 0) <= 1) return { status: 400 as const, error: 'Cannot delete the last remaining administrator.' };
+        }
+        const { count: depositCount, error: depositCheckError } = await supabase
+          .from('deposits').select('id', { count: 'exact', head: true }).eq('user_id', req.params.id);
+        if (depositCheckError) throw depositCheckError;
+        if ((depositCount || 0) > 0) {
+          return { status: 409 as const, error: 'This account has payment records and cannot be deleted. Keep the account for financial audit history.' };
+        }
+        const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+        if (error) throw error;
+        return { status: 200 as const, email: target.email };
+      },
+      () => {
+        const target = localFallbackStore.findUserById(req.params.id);
+        if (!target) return { status: 404 as const, error: 'User not found.' };
+        if (target.role === 'admin') {
+          const count = localFallbackStore.listUsers().filter((u) => u.role === 'admin').length;
+          if (count <= 1) return { status: 400 as const, error: 'Cannot delete the last remaining administrator.' };
+        }
+        if (localFallbackStore.countDepositsByUser(req.params.id) > 0) {
+          return { status: 409 as const, error: 'This account has payment records and cannot be deleted. Keep the account for financial audit history.' };
+        }
+        localFallbackStore.deleteUser(req.params.id);
+        return { status: 200 as const, email: target.email };
+      }
+    );
+    if (result.status !== 200) return res.status(result.status).json({ error: result.error });
+    return res.json({ message: `User ${result.email} has been deleted.` });
   } catch (error) {
-    console.error('[Supabase Delete User Error]:', error);
+    console.error('[Delete User Error]:', error);
     return res.status(500).json({ error: 'Could not delete user.' });
   }
 });
@@ -1279,27 +1691,48 @@ app.post(
         updatedAt: Date.now(),
       };
 
-            const supabase = getSupabaseClient();
+      const depositInsertErr = await withStoreFallback(
+        async () => {
+          const { error: depositError } = await getSupabaseClient()
+            .from('deposits')
+            .insert({
+              id: newDeposit.id,
+              user_id: newDeposit.userId,
+              merchant_reference: newDeposit.merchantReference,
+              amount_kes: newDeposit.amountKes,
+              amount_subunits: newDeposit.amountSubunits,
+              amount_usd: newDeposit.amountUsd,
+              currency: newDeposit.currency,
+              session_id: newDeposit.sessionId,
+              checkout_url: newDeposit.checkoutUrl,
+              status: newDeposit.status,
+              created_at: newDeposit.createdAt,
+              updated_at: newDeposit.updatedAt,
+            });
+          if (depositError && isSupabaseTransportError(depositError)) throw depositError;
+          return depositError;
+        },
+        () => {
+          localFallbackStore.insertDeposit({
+            id: newDeposit.id,
+            user_id: newDeposit.userId,
+            merchant_reference: newDeposit.merchantReference,
+            amount_kes: newDeposit.amountKes,
+            amount_subunits: newDeposit.amountSubunits,
+            amount_usd: newDeposit.amountUsd,
+            currency: newDeposit.currency,
+            session_id: newDeposit.sessionId,
+            checkout_url: newDeposit.checkoutUrl,
+            status: newDeposit.status,
+            created_at: newDeposit.createdAt,
+            updated_at: newDeposit.updatedAt,
+          });
+          return null;
+        }
+      );
 
-      const { error: depositError } = await supabase
-        .from('deposits')
-        .insert({
-          id: newDeposit.id,
-          user_id: newDeposit.userId,
-          merchant_reference: newDeposit.merchantReference,
-          amount_kes: newDeposit.amountKes,
-          amount_subunits: newDeposit.amountSubunits,
-          amount_usd: newDeposit.amountUsd,
-          currency: newDeposit.currency,
-          session_id: newDeposit.sessionId,
-          checkout_url: newDeposit.checkoutUrl,
-          status: newDeposit.status,
-          created_at: newDeposit.createdAt,
-          updated_at: newDeposit.updatedAt,
-        });
-
-      if (depositError) {
-        console.error('[Supabase Deposit Save Error]:', depositError);
+      if (depositInsertErr) {
+        console.error('[Deposit Save Error]:', depositInsertErr);
         return res.status(500).json({
           error: 'Could not save deposit. Please contact support.',
         });
@@ -1365,21 +1798,21 @@ app.post(
 app.get('/api/paynecta/deposits', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user!;
-    const supabase = getSupabaseClient();
+    const data = await withStoreFallback(
+      async () => {
+        const { data: rows, error } = await getSupabaseClient()
+          .from('deposits')
+          .select('*')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+          .limit(50);
+        if (error) throw error;
+        return rows || [];
+      },
+      () => localFallbackStore.listDepositsByUser(user.id, 50)
+    );
 
-    const { data, error } = await supabase
-      .from('deposits')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    if (error) {
-      console.error('[Supabase Deposit History Error]:', error);
-      return res.status(500).json({ error: 'Could not load deposit history.' });
-    }
-
-    const deposits = (data || []).map((d) => ({
+    const deposits = data.map((d: any) => ({
       id: d.id,
       userId: d.user_id,
       merchantReference: d.merchant_reference,
@@ -1401,7 +1834,7 @@ app.get('/api/paynecta/deposits', requireAuth, async (req: AuthenticatedRequest,
 
     return res.json({ deposits });
   } catch (err: any) {
-    console.error('[Supabase Deposit History Error]:', err);
+    console.error('[Deposit History Error]:', err);
     return res.status(500).json({ error: 'Could not load deposit history.' });
   }
 });
@@ -1416,18 +1849,19 @@ app.post(
     try {
       const depositId = req.params.id;
       const user = req.user!;
-      const supabase = getSupabaseClient();
 
-      const { data: row, error: fetchError } = await supabase
-        .from('deposits')
-        .select('*')
-        .eq('id', depositId)
-        .maybeSingle();
-
-      if (fetchError) {
-        console.error('[Supabase Deposit Fetch Error]:', fetchError);
-        return res.status(500).json({ error: 'Could not load deposit.' });
-      }
+      const row = await withStoreFallback(
+        async () => {
+          const { data, error } = await getSupabaseClient()
+            .from('deposits')
+            .select('*')
+            .eq('id', depositId)
+            .maybeSingle();
+          if (error) throw error;
+          return data;
+        },
+        () => localFallbackStore.findDepositById(depositId)
+      );
 
       if (!row) {
         return res.status(404).json({ error: 'Deposit record not found.' });
@@ -1444,13 +1878,13 @@ app.post(
         amountKes: Number(row.amount_kes),
         amountSubunits: Number(row.amount_subunits),
         amountUsd: Number(row.amount_usd),
-        currency: row.currency,
-        sessionId: row.session_id,
-        checkoutUrl: row.checkout_url,
-        providerReference: row.provider_reference,
-        receiptNumber: row.receipt_number,
-        status: row.status,
-        failureReason: row.failure_reason,
+        currency: row.currency as 'KES',
+        sessionId: row.session_id || undefined,
+        checkoutUrl: row.checkout_url || undefined,
+        providerReference: row.provider_reference || undefined,
+        receiptNumber: row.receipt_number || undefined,
+        status: row.status as DepositRecord['status'],
+        failureReason: row.failure_reason || undefined,
         confirmedAmountKes: row.confirmed_amount_kes == null
           ? undefined
           : Number(row.confirmed_amount_kes),
@@ -1462,11 +1896,18 @@ app.post(
       };
 
       if (deposit.status === 'succeeded') {
-        const { data: account } = await supabase
-          .from('users')
-          .select('real_balance')
-          .eq('id', deposit.userId)
-          .maybeSingle();
+        const account = await withStoreFallback(
+          async () => {
+            const { data, error } = await getSupabaseClient()
+              .from('users')
+              .select('real_balance')
+              .eq('id', deposit.userId)
+              .maybeSingle();
+            if (error) throw error;
+            return data;
+          },
+          () => localFallbackStore.findUserById(deposit.userId)
+        );
 
         return res.json({
           status: 'succeeded',
@@ -1512,23 +1953,29 @@ app.post(
           verification.providerReference ||
           null;
 
-        const { data: creditResult, error: creditError } = await supabase.rpc(
-          'confirm_paynecta_deposit',
-          {
-            p_deposit_id: deposit.id,
-            p_provider_reference: providerReference,
-            p_receipt_number: receiptNumber,
-            p_confirmed_amount_kes: verification.confirmedAmountKes,
-            p_source: 'verification',
-          }
+        const creditResult = await withStoreFallback(
+          async () => {
+            const { data, error } = await getSupabaseClient().rpc(
+              'confirm_paynecta_deposit',
+              {
+                p_deposit_id: deposit.id,
+                p_provider_reference: providerReference,
+                p_receipt_number: receiptNumber,
+                p_confirmed_amount_kes: verification.confirmedAmountKes,
+                p_source: 'verification',
+              }
+            );
+            if (error) throw error;
+            return data;
+          },
+          () =>
+            localFallbackStore.confirmDeposit({
+              depositId: deposit.id,
+              providerReference,
+              receiptNumber,
+              confirmedAmountKes: verification.confirmedAmountKes!,
+            })
         );
-
-        if (creditError) {
-          console.error('[Atomic Deposit Credit Error]:', creditError);
-          return res.status(500).json({
-            error: 'Payment was verified, but balance crediting needs reconciliation.',
-          });
-        }
 
         if (!creditResult?.success) {
           console.error('[Atomic Deposit Credit Rejected]:', creditResult);
@@ -1568,22 +2015,31 @@ app.post(
             ? 'Payment declined or refused by provider.'
             : 'Payment was cancelled.');
 
-        const { error: updateError } = await supabase
-          .from('deposits')
-          .update({
-            status: verification.status,
-            failure_reason: failureReason,
-            updated_at: now,
-          })
-          .eq('id', deposit.id)
-          .neq('status', 'succeeded');
-
-        if (updateError) {
-          console.error('[Deposit Status Update Error]:', updateError);
-          return res.status(500).json({
-            error: 'Could not update deposit status.',
-          });
-        }
+        await withStoreFallback(
+          async () => {
+            const { error } = await getSupabaseClient()
+              .from('deposits')
+              .update({
+                status: verification.status,
+                failure_reason: failureReason,
+                updated_at: now,
+              })
+              .eq('id', deposit.id)
+              .neq('status', 'succeeded');
+            if (error) throw error;
+          },
+          () => {
+            localFallbackStore.updateDeposit(
+              deposit.id,
+              {
+                status: verification.status,
+                failure_reason: failureReason,
+                updated_at: now,
+              },
+              { neqStatus: 'succeeded' }
+            );
+          }
+        );
 
         return res.json({
           status: verification.status,
@@ -1597,10 +2053,18 @@ app.post(
         });
       }
 
-      await supabase
-        .from('deposits')
-        .update({ updated_at: now })
-        .eq('id', deposit.id);
+      await withStoreFallback(
+        async () => {
+          const { error } = await getSupabaseClient()
+            .from('deposits')
+            .update({ updated_at: now })
+            .eq('id', deposit.id);
+          if (error) throw error;
+        },
+        () => {
+          localFallbackStore.updateDeposit(deposit.id, { updated_at: now });
+        }
+      );
 
       if (verification.status === 'verification_delayed') {
         return res.json({
@@ -1628,7 +2092,6 @@ app.post(
 );
 
 // 5. CANCEL PENDING DEPOSIT
-// 5. CANCEL PENDING DEPOSIT (SUPABASE)
 app.post(
   '/api/paynecta/cancel-deposit/:id',
   requireAuth,
@@ -1637,18 +2100,19 @@ app.post(
     try {
       const depositId = req.params.id;
       const user = req.user!;
-      const supabase = getSupabaseClient();
 
-      const { data: deposit, error: fetchError } = await supabase
-        .from('deposits')
-        .select('*')
-        .eq('id', depositId)
-        .maybeSingle();
-
-      if (fetchError) {
-        console.error('[Supabase Cancel Deposit Fetch Error]:', fetchError);
-        return res.status(500).json({ error: 'Could not load deposit.' });
-      }
+      const deposit = await withStoreFallback(
+        async () => {
+          const { data, error } = await getSupabaseClient()
+            .from('deposits')
+            .select('*')
+            .eq('id', depositId)
+            .maybeSingle();
+          if (error) throw error;
+          return data;
+        },
+        () => localFallbackStore.findDepositById(depositId)
+      );
 
       if (!deposit) {
         return res.status(404).json({ error: 'Deposit record not found.' });
@@ -1666,22 +2130,34 @@ app.post(
       }
 
       if (deposit.status === 'pending') {
-        const { data: updatedDeposit, error: updateError } = await supabase
-          .from('deposits')
-          .update({
-            status: 'cancelled',
-            failure_reason: 'Cancelled by user.',
-            updated_at: Date.now(),
-          })
-          .eq('id', depositId)
-          .eq('status', 'pending')
-          .select()
-          .maybeSingle();
-
-        if (updateError) {
-          console.error('[Supabase Cancel Deposit Update Error]:', updateError);
-          return res.status(500).json({ error: 'Could not cancel deposit.' });
-        }
+        const now = Date.now();
+        const updatedDeposit = await withStoreFallback(
+          async () => {
+            const { data, error } = await getSupabaseClient()
+              .from('deposits')
+              .update({
+                status: 'cancelled',
+                failure_reason: 'Cancelled by user.',
+                updated_at: now,
+              })
+              .eq('id', depositId)
+              .eq('status', 'pending')
+              .select()
+              .maybeSingle();
+            if (error) throw error;
+            return data;
+          },
+          () =>
+            localFallbackStore.updateDeposit(
+              depositId,
+              {
+                status: 'cancelled',
+                failure_reason: 'Cancelled by user.',
+                updated_at: now,
+              },
+              { eqStatus: 'pending' }
+            )
+        );
 
         return res.json({
           message: updatedDeposit
@@ -1705,7 +2181,6 @@ app.post(
 );
 
 // 6. PAYNECTA WEBHOOK RECEIVER (HMAC-SHA256 SIGNED WITH REPLAY PROTECTION)
-// 6. PAYNECTA WEBHOOK RECEIVER (SUPABASE + ATOMIC CREDITING)
 app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
   try {
     const signature = (
@@ -1780,27 +2255,32 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       });
     }
 
-    const supabase = getSupabaseClient();
+    const deposit = await withStoreFallback(
+      async () => {
+        let depositQuery = getSupabaseClient().from('deposits').select('*');
 
-    let depositQuery = supabase.from('deposits').select('*');
+        if (merchantReference) {
+          depositQuery = depositQuery.eq('merchant_reference', merchantReference);
+        } else if (sessionId) {
+          depositQuery = depositQuery.eq('session_id', sessionId);
+        } else {
+          depositQuery = depositQuery.eq('provider_reference', providerReference);
+        }
 
-    if (merchantReference) {
-      depositQuery = depositQuery.eq('merchant_reference', merchantReference);
-    } else if (sessionId) {
-      depositQuery = depositQuery.eq('session_id', sessionId);
-    } else {
-      depositQuery = depositQuery.eq('provider_reference', providerReference);
-    }
-
-    const { data: deposit, error: depositError } = await depositQuery.maybeSingle();
-
-    if (depositError) {
-      console.error('[Paynecta Webhook] Supabase lookup error:', depositError);
-      return res.status(500).json({ error: 'Could not locate payment record.' });
-    }
+        const { data, error } = await depositQuery.maybeSingle();
+        if (error) throw error;
+        return data;
+      },
+      () =>
+        localFallbackStore.findDepositByLookup({
+          merchantReference,
+          sessionId,
+          providerReference,
+        })
+    );
 
     if (!deposit) {
-      console.warn('[Paynecta Webhook] No matching Supabase deposit:', merchantReference || sessionId);
+      console.warn('[Paynecta Webhook] No matching deposit:', merchantReference || sessionId);
       return res.json({ received: true, note: 'Deposit not found.' });
     }
 
@@ -1833,19 +2313,32 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
         return res.status(409).json({ error: 'Payment amount or currency mismatch; no balance was credited.' });
       }
 
-      const { data: creditResult, error: creditError } = await supabase.rpc(
-        'confirm_paynecta_deposit',
-        {
-          p_deposit_id: deposit.id,
-          p_provider_reference: providerReference || 'PAYNECTA_WEBHOOK',
-          p_receipt_number: receiptNumber || null,
-          p_confirmed_amount_kes: paidSubunits / 100,
-          p_source: 'webhook',
-        }
+      const creditResult = await withStoreFallback(
+        async () => {
+          const { data, error } = await getSupabaseClient().rpc(
+            'confirm_paynecta_deposit',
+            {
+              p_deposit_id: deposit.id,
+              p_provider_reference: providerReference || 'PAYNECTA_WEBHOOK',
+              p_receipt_number: receiptNumber || null,
+              p_confirmed_amount_kes: paidSubunits / 100,
+              p_source: 'webhook',
+            }
+          );
+          if (error) throw error;
+          return data;
+        },
+        () =>
+          localFallbackStore.confirmDeposit({
+            depositId: deposit.id,
+            providerReference: providerReference || 'PAYNECTA_WEBHOOK',
+            receiptNumber: receiptNumber || null,
+            confirmedAmountKes: paidSubunits / 100,
+          })
       );
 
-      if (creditError || !creditResult?.success) {
-        console.error('[Paynecta Webhook] Atomic credit failed:', creditError || creditResult);
+      if (!creditResult?.success) {
+        console.error('[Paynecta Webhook] Atomic credit failed:', creditResult);
         return res.status(500).json({
           error: 'Payment received but deposit crediting needs reconciliation.',
         });
@@ -1860,20 +2353,32 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       eventStatus === 'expired' ||
       eventType.includes('payment.cancelled')
     ) {
-      const { error } = await supabase
-        .from('deposits')
-        .update({
-          status: 'cancelled',
-          failure_reason: 'Payment was cancelled by user.',
-          updated_at: Date.now(),
-        })
-        .eq('id', deposit.id)
-        .neq('status', 'succeeded');
-
-      if (error) {
-        console.error('[Paynecta Webhook] Cancel status update:', error);
-        return res.status(500).json({ error: 'Could not update deposit status.' });
-      }
+      const now = Date.now();
+      await withStoreFallback(
+        async () => {
+          const { error } = await getSupabaseClient()
+            .from('deposits')
+            .update({
+              status: 'cancelled',
+              failure_reason: 'Payment was cancelled by user.',
+              updated_at: now,
+            })
+            .eq('id', deposit.id)
+            .neq('status', 'succeeded');
+          if (error) throw error;
+        },
+        () => {
+          localFallbackStore.updateDeposit(
+            deposit.id,
+            {
+              status: 'cancelled',
+              failure_reason: 'Payment was cancelled by user.',
+              updated_at: now,
+            },
+            { neqStatus: 'succeeded' }
+          );
+        }
+      );
     } else if (
       eventStatus === 'failed' ||
       eventStatus === 'declined' ||
@@ -1882,23 +2387,36 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
       eventStatus === 'timed_out' ||
       eventType.includes('payment.failed')
     ) {
-      const { error } = await supabase
-        .from('deposits')
-        .update({
-          status: 'failed',
-          failure_reason:
-            event.failure_reason ||
-            event.data?.failure_reason ||
-            'Payment failed.',
-          updated_at: Date.now(),
-        })
-        .eq('id', deposit.id)
-        .neq('status', 'succeeded');
-
-      if (error) {
-        console.error('[Paynecta Webhook] Failed status update:', error);
-        return res.status(500).json({ error: 'Could not update deposit status.' });
-      }
+      const now = Date.now();
+      const failureReason =
+        event.failure_reason ||
+        event.data?.failure_reason ||
+        'Payment failed.';
+      await withStoreFallback(
+        async () => {
+          const { error } = await getSupabaseClient()
+            .from('deposits')
+            .update({
+              status: 'failed',
+              failure_reason: failureReason,
+              updated_at: now,
+            })
+            .eq('id', deposit.id)
+            .neq('status', 'succeeded');
+          if (error) throw error;
+        },
+        () => {
+          localFallbackStore.updateDeposit(
+            deposit.id,
+            {
+              status: 'failed',
+              failure_reason: failureReason,
+              updated_at: now,
+            },
+            { neqStatus: 'succeeded' }
+          );
+        }
+      );
     }
 
     return res.json({ received: true });

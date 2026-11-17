@@ -8,4 +8,4 @@ coverage/
 !.env.example
 
 # Persistent local database files must never be committed
-data/
+/data/
