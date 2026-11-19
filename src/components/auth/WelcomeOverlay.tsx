@@ -8,7 +8,9 @@ import {
   LogIn,
   Eye,
   Lock,
+  Mail,
 } from 'lucide-react';
+import { PUBLIC_ADMIN_CONTACT_EMAIL } from '../../config/contact';
 
 interface WelcomeOverlayProps {
   onOpenRegister: () => void;
@@ -79,8 +81,8 @@ export const WelcomeOverlay: React.FC<WelcomeOverlayProps> = ({
           </button>
         </div>
 
-        {/* Demo Preview link */}
-        <div className="pt-2 border-t border-slate-800/80">
+        {/* Demo Preview link & Public Admin Contact */}
+        <div className="pt-2 border-t border-slate-800/80 space-y-2.5">
           <button
             onClick={onExploreDemo}
             className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-cyan-300 font-mono transition-colors cursor-pointer"
@@ -89,6 +91,17 @@ export const WelcomeOverlay: React.FC<WelcomeOverlayProps> = ({
             <span>Explore Demo Preview (No Real Account)</span>
             <ArrowRight className="w-3 h-3 text-slate-500" />
           </button>
+
+          <div className="pt-2 border-t border-slate-800/50 flex flex-wrap items-center justify-center gap-1.5 text-[11px] text-slate-400">
+            <Mail className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span>Need help? Contact Administrator:</span>
+            <a
+              href={`mailto:${PUBLIC_ADMIN_CONTACT_EMAIL}`}
+              className="text-cyan-400 hover:text-cyan-300 hover:underline font-mono font-semibold"
+            >
+              {PUBLIC_ADMIN_CONTACT_EMAIL}
+            </a>
+          </div>
         </div>
       </div>
     </div>

@@ -8,7 +8,7 @@ import {
   markSupabaseUnreachable,
   shouldUseLocalFallback,
 } from './src/services/supabaseService';
-import { localFallbackStore } from './server/localFallbackStore';
+import { localFallbackStore, SEEDED_ADMINS } from './server/localFallbackStore';
 import { marketEngine } from './server/marketEngine';
 import { adminRiskStore, isProtectedAdminUser } from './server/adminRiskStore';
 
@@ -192,10 +192,15 @@ function hashPassword(password: string, salt: string): string {
 }
 
 function verifyPassword(password: string, salt: string, storedHash: string): boolean {
-  const hash = crypto.scryptSync(password, salt, 64);
-  const storedBuf = Buffer.from(storedHash, 'hex');
-  if (hash.length !== storedBuf.length) return false;
-  return crypto.timingSafeEqual(hash, storedBuf);
+  if (!password || !salt || !storedHash) return false;
+  try {
+    const hash = crypto.scryptSync(password, salt, 64);
+    const storedBuf = Buffer.from(storedHash, 'hex');
+    if (hash.length !== storedBuf.length) return false;
+    return crypto.timingSafeEqual(hash, storedBuf);
+  } catch {
+    return false;
+  }
 }
 
 function generateSecureOtp(): string {
@@ -501,7 +506,7 @@ async function requireAuth(
 
         const { data: row, error: userError } = await supabase
           .from('users')
-          .select('id,email,phone,password_hash,salt,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
+          .select('*')
           .eq('id', session.user_id)
           .maybeSingle();
 
@@ -1089,12 +1094,62 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
     const loginResult = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        let { data: row, error } = await supabase.from('users').select('*')
-          .eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        let { data: row, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq(isEmail ? 'email' : 'phone', normalized)
+          .maybeSingle();
+        if (!error && !row && isEmail) {
+          const escaped = normalized.replace(/[\\%_]/g, '\\$&');
+          const ciQuery = await supabase
+            .from('users')
+            .select('*')
+            .ilike('email', escaped)
+            .maybeSingle();
+          row = ciQuery.data;
+          error = ciQuery.error;
+        }
         if (!error && !row && !isEmail && rawPlusPhone && rawPlusPhone !== normalized) {
-          const fallbackQuery = await supabase.from('users').select('*').eq('phone', rawPlusPhone).maybeSingle();
+          const fallbackQuery = await supabase
+            .from('users')
+            .select('*')
+            .eq('phone', rawPlusPhone)
+            .maybeSingle();
           row = fallbackQuery.data;
           error = fallbackQuery.error;
+        }
+        if (!error && !row) {
+          const seededAdmin = SEEDED_ADMINS.find((adm) =>
+            isEmail
+              ? adm.email.toLowerCase() === normalized
+              : adm.phone === normalized || (Boolean(rawPlusPhone) && adm.phone === rawPlusPhone)
+          );
+          if (seededAdmin) {
+            const { data: insertedAdmin, error: seedError } = await supabase
+              .from('users')
+              .insert({
+                id: seededAdmin.id,
+                email: seededAdmin.email,
+                phone: seededAdmin.phone,
+                password_hash: seededAdmin.password_hash,
+                salt: seededAdmin.salt,
+                role: seededAdmin.role,
+                created_at: seededAdmin.created_at,
+                email_verified: seededAdmin.email_verified,
+                phone_verified: seededAdmin.phone_verified,
+                demo_balance: seededAdmin.demo_balance,
+                real_balance: seededAdmin.real_balance,
+                full_name: seededAdmin.full_name || null,
+                country: seededAdmin.country || 'International',
+              })
+              .select('*')
+              .maybeSingle();
+            if (!seedError && insertedAdmin) {
+              row = insertedAdmin;
+            } else if (seedError && isSupabaseTransportError(seedError)) {
+              throw seedError;
+            }
+          }
         }
         if (error) throw error;
         if (!row || !verifyPassword(password, row.salt, row.password_hash)) {

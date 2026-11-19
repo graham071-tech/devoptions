@@ -90,7 +90,7 @@ function resolveDbPath(): string {
 
 const DB_FILE = resolveDbPath();
 
-const SEEDED_ADMINS: LocalUserRow[] = [
+export const SEEDED_ADMINS: LocalUserRow[] = [
   {
     id: 'admin_4f5a945e',
     email: 'admin@devoptions.io',

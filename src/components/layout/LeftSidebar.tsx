@@ -19,7 +19,9 @@ import {
   ChevronRight,
   Settings,
   X,
+  Mail,
 } from 'lucide-react';
+import { PUBLIC_ADMIN_CONTACT_EMAIL } from '../../config/contact';
 
 interface LeftSidebarProps {
   currentPage: PageId;
@@ -402,6 +404,21 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
             </button>
           </div>
         )}
+
+        {/* Public Administrator Contact Link */}
+        <a
+          href={`mailto:${PUBLIC_ADMIN_CONTACT_EMAIL}`}
+          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-900/50 hover:bg-slate-900 border border-slate-800/70 text-[10px] text-slate-400 hover:text-cyan-300 transition-colors"
+          title={`Contact Administrator (${PUBLIC_ADMIN_CONTACT_EMAIL})`}
+        >
+          <span className="flex items-center gap-1.5 font-semibold text-slate-300 shrink-0">
+            <Mail className="w-3 h-3 text-cyan-400" />
+            <span>Admin Contact</span>
+          </span>
+          <span className="font-mono text-cyan-400 truncate ml-2">
+            {PUBLIC_ADMIN_CONTACT_EMAIL}
+          </span>
+        </a>
       </div>
     </aside>
   );

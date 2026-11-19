@@ -2,7 +2,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 let supabaseClient: SupabaseClient | null = null;
 let supabaseStatusCache: { reachable: boolean; checkedAt: number } | null = null;
-const REACHABILITY_CACHE_MS = 30_000;
+const REACHABLE_CACHE_MS = 30_000;
+const UNREACHABLE_CACHE_MS = 5_000;
 
 export function getSupabaseClient(): SupabaseClient {
   if (supabaseClient) {
@@ -70,13 +71,16 @@ export async function shouldUseLocalFallback(): Promise<boolean> {
   }
 
   const now = Date.now();
-  if (supabaseStatusCache && now - supabaseStatusCache.checkedAt < REACHABILITY_CACHE_MS) {
-    return !supabaseStatusCache.reachable;
+  if (supabaseStatusCache) {
+    const ttl = supabaseStatusCache.reachable ? REACHABLE_CACHE_MS : UNREACHABLE_CACHE_MS;
+    if (now - supabaseStatusCache.checkedAt < ttl) {
+      return !supabaseStatusCache.reachable;
+    }
   }
 
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
+    const timer = setTimeout(() => controller.abort(), 4000);
     try {
       const res = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/rest/v1/`, {
         method: 'HEAD',

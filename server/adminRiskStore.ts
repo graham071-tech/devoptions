@@ -166,8 +166,7 @@ class AdminRiskStore {
   }
 
   private async ensureRemoteLoaded(user: { id: string; email: string }): Promise<AdminRiskState> {
-    if (!this.syncedFromRemote.has(user.id) && process.env.NODE_ENV !== 'test') {
-      this.syncedFromRemote.add(user.id);
+    if (process.env.NODE_ENV !== 'test') {
       try {
         if (!(await shouldUseLocalFallback())) {
           const { data, error } = await getSupabaseClient()
@@ -179,7 +178,7 @@ class AdminRiskStore {
           if (data?.state) {
             const remote = recomputeDerivedFields(data.state as AdminRiskState);
             const local = this.states.get(user.id);
-            if (!local || Number(remote.updatedAt) > Number(local.updatedAt)) {
+            if (!local || Number(remote.updatedAt) >= Number(local.updatedAt)) {
               this.states.set(user.id, remote);
               this.saveToDiskSync();
             }
