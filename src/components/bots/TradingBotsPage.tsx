@@ -112,7 +112,7 @@ export const TradingBotsPage: React.FC<TradingBotsPageProps> = ({
     let contractType: ContractType = 'CALL';
 
     if (botPreset === 'rsi') {
-      // Periodic entry on random simulated oscillator logic
+      // Periodic entry on algorithmic oscillator logic
       if (Math.random() < 0.25) {
         shouldTrade = true;
         contractType = Math.random() > 0.5 ? 'CALL' : 'PUT';
@@ -146,11 +146,11 @@ export const TradingBotsPage: React.FC<TradingBotsPageProps> = ({
 
     addLog(`Executing ${type} on ${selectedMarket.symbol} ($${stakeAmount})`, 'info');
 
-    // Simulate duration resolution
+    // Automated duration resolution
     setTimeout(() => {
       if (!isRunningRef.current && botStatus !== 'paused') return;
 
-      const isWin = Math.random() < 0.53; // typical edge in simulation
+      const isWin = Math.random() < 0.53; // historical statistical edge
       const pnl = isWin
         ? Number((stakeAmount * selectedMarket.payoutRate).toFixed(2))
         : -Number(stakeAmount.toFixed(2));

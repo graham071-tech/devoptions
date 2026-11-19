@@ -24,7 +24,7 @@ interface SettingsPageProps {
   onUpdateProfile: (p: UserProfile) => void;
   onNavigate: (page: PageId) => void;
   isWsConnected: boolean;
-  dataSource: 'live' | 'simulated';
+  dataSource: 'live' | 'demo';
   latencyMs: number;
 }
 
@@ -58,7 +58,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `stratum_backup_${Date.now()}.json`;
+    a.download = `devoptions_backup_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
     showToast('success', 'Backup Exported', 'Downloaded complete configuration and history.');
@@ -88,7 +88,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     const updated = storage.resetDemoBalance(10000.0);
     setFormProfile(updated);
     onUpdateProfile(updated);
-    showToast('success', 'Balance Restored', 'Virtual demo funds reset to $10,000.00 USD.');
+    showToast('success', 'Balance Restored', 'Available demo balance reset to $10,000.00 USD.');
   };
 
   return (

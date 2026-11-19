@@ -36,7 +36,7 @@ interface DashboardProps {
   profile: UserProfile;
   tradingMode: 'demo' | 'real';
   isWsConnected: boolean;
-  dataSource: 'live' | 'simulated';
+  dataSource: 'live' | 'demo';
   latencyMs: number;
   onNavigate: (page: PageId) => void;
   onSelectStrategy: (strat: Strategy) => void;
@@ -141,7 +141,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         {/* Demo Balance Card */}
         <div className="p-4 bg-[#090D16] border border-slate-800 rounded-xl space-y-2">
           <div className="flex items-center justify-between text-xs text-slate-400">
-            <span>Practice Demo Balance</span>
+            <span>Demo Available Balance</span>
             <span className="text-[10px] uppercase font-bold text-cyan-400">DEMO</span>
           </div>
           <p className="font-mono text-2xl font-bold text-slate-100 tabular-nums">

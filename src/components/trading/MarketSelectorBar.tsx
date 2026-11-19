@@ -20,7 +20,7 @@ interface MarketSelectorBarProps {
   direction: 'up' | 'down' | 'flat';
   lastDigit: number;
   isWsConnected: boolean;
-  dataSource: 'live' | 'simulated';
+  dataSource: 'live' | 'demo';
   favorites: string[];
   onToggleFavorite: (symbol: string) => void;
   onReconnect: () => void;

@@ -103,7 +103,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {!isCollapsed && (
           <div className="p-3 bg-slate-900/80 rounded-lg border border-slate-800 space-y-2">
             <div className="flex items-center justify-between text-[11px] text-slate-400">
-              <span className="font-semibold text-slate-300">Practice Demo</span>
+              <span className="font-semibold text-slate-300">Demo Account</span>
               <button
                 onClick={onResetBalance}
                 title="Reset demo funds to $10,000"

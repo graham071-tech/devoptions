@@ -36,7 +36,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
   const handleResetDemo = () => {
     const updated = storage.resetDemoBalance(10000.0);
     onUpdateProfile(updated);
-    showToast('success', 'Demo Balance Reset', 'Virtual balance restored to $10,000.00 USD.');
+    showToast('success', 'Demo Balance Reset', 'Available demo balance restored to $10,000.00 USD.');
   };
 
   const handleAddDemoFunds = () => {
@@ -66,7 +66,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
             </h2>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Overview of practice demo funds, real account gateway, and lifetime metrics
+            Overview of demo available funds, real account gateway, and lifetime metrics
           </p>
         </div>
       </div>
@@ -77,7 +77,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
         <div className="bg-[#090D16] border border-cyan-500/30 rounded-xl p-5 space-y-4 shadow-xl">
           <div className="flex items-center justify-between">
             <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">
-              Practice Demo Balance
+              Demo Available Balance
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 font-mono font-bold">
               ACTIVE DEMO
@@ -85,7 +85,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
           </div>
 
           <div>
-            <span className="text-xs text-slate-400">Available Practice Balance</span>
+            <span className="text-xs text-slate-400">Available Demo Balance</span>
             <p className="font-mono text-3xl font-bold text-slate-100 mt-1 tabular-nums">
               ${profile.demoBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}{' '}
               <span className="text-sm font-normal text-slate-400">{profile.currency}</span>
@@ -195,7 +195,7 @@ export const AccountPage: React.FC<AccountPageProps> = ({
         <div className="space-y-1">
           <span className="font-semibold text-slate-100">Zero-Risk Development Environment</span>
           <p className="text-[11px] text-slate-400 leading-relaxed">
-            Stratum Binary Pro provides a client-side execution sandbox using authentic tick data from Deriv’s official WebSocket API. Real trading is kept behind explicit confirmation guards to protect users from accidental live transactions.
+            DevOptions provides a risk-free Demo trading environment alongside account gateway controls. Live broker executions are never triggered from Demo mode.
           </p>
         </div>
       </div>

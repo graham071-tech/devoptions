@@ -77,7 +77,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
     if (!activeStrategy) return;
 
     setIsRunning(true);
-    showToast('info', 'Running Backtest', `Simulating ${settings.sampleSize} historical ticks...`);
+    showToast('info', 'Running Backtest', `Analyzing ${settings.sampleSize} historical ticks...`);
 
     setTimeout(() => {
       // Gather candle closes or generate historical series matching market parameters
@@ -109,7 +109,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
       showToast(
         'success',
         'Backtest Completed',
-        `Evaluated ${result.totalTrades} simulated trades with ${result.winRate}% win rate.`
+        `Evaluated ${result.totalTrades} historical trades with ${result.winRate}% win rate.`
       );
     }, 400);
   };
@@ -128,7 +128,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
         <div>
           <h2 className="text-xl font-bold tracking-tight text-slate-100 flex items-center gap-2">
             <FlaskConical className="w-5 h-5 text-indigo-400" />
-            <span>Strategy Backtesting & Historical Simulation</span>
+            <span>Strategy Backtesting & Historical Analysis</span>
           </h2>
           <p className="text-xs text-slate-400 mt-1">
             Evaluate rule performance, drawdowns, and risk parameters against tick price sequences
@@ -153,7 +153,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
         {/* Left Column: Configuration Form (4 cols) */}
         <div className="lg:col-span-4 bg-[#090D16] border border-slate-800 rounded-xl p-5 space-y-4">
           <h3 className="font-semibold text-slate-200 text-xs uppercase tracking-wider">
-            Simulation Parameters
+            Backtest Parameters
           </h3>
 
           {/* Strategy Selector */}
@@ -320,7 +320,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
             className="w-full flex items-center justify-center gap-2 py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-lg text-xs transition-colors shadow-lg shadow-indigo-950/40"
           >
             <FlaskConical className={`w-4 h-4 ${isRunning ? 'animate-spin' : ''}`} />
-            <span>{isRunning ? 'Calculating Simulation...' : 'Run Backtest Simulation'}</span>
+            <span>{isRunning ? 'Calculating Analysis...' : 'Run Backtest Analysis'}</span>
           </button>
         </div>
 
@@ -416,7 +416,7 @@ export const BacktestEngine: React.FC<BacktestEngineProps> = ({
                 />
               )}
 
-              {/* Simulated Trade Execution Log */}
+              {/* Historical Trade Execution Log */}
               <div className="bg-[#090D16] border border-slate-800 rounded-xl overflow-hidden">
                 <div className="p-3 bg-slate-900/60 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
                   <h4 className="font-semibold text-slate-200">

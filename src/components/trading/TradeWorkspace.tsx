@@ -33,7 +33,7 @@ interface TradeWorkspaceProps {
   onToggleTradingMode?: (mode: 'demo' | 'real') => void;
   onNavigate: (page: PageId) => void;
   isWsConnected: boolean;
-  dataSource: 'live' | 'demo' | 'simulated';
+  dataSource: 'live' | 'demo';
   activeTrades?: Trade[];
   onSetActiveTrades?: React.Dispatch<React.SetStateAction<Trade[]>>;
   completedTrades?: Trade[];
@@ -153,17 +153,21 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
   );
   const placementInProgressRef = useRef<boolean>(false);
   const botCooldownUntilRef = useRef<number>(0);
-  const adminRiskRef = useRef<AdminRiskState | null>(authClient.getLastRiskState());
+  const [adminRiskState, setAdminRiskState] = useState<AdminRiskState | null>(() =>
+    authClient.getLastRiskState()
+  );
+  const adminRiskRef = useRef<AdminRiskState | null>(adminRiskState);
   const prevRiskHaltedRef = useRef<boolean>(Boolean(adminRiskRef.current?.halted));
 
   useEffect(() => {
     return authClient.subscribeRiskState((rs) => {
       adminRiskRef.current = rs;
+      setAdminRiskState(rs);
       const isHalted = Boolean(rs && rs.enabled && rs.halted);
       if (isHalted) {
         const reason =
           rs?.haltReason ||
-          'Administrator risk protection halted automated trading. Manually restart to continue.';
+          'Administrator risk protection halted automated trading. Manual intervention is required to continue.';
         const wasRunning = botStatusRef.current === 'running';
         botStatusRef.current = 'stopped';
         setBotStatus('stopped');
@@ -190,8 +194,8 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     });
   }, [botStatus, botPhase, stopReason, botConfig, sessionStats]);
 
-  // Submit simulated trade cleanly (respects validation & server atomic persistence when signed in)
-  const submitSimulatedTrade = async (trade: Trade): Promise<boolean> => {
+  // Submit trade order cleanly (respects validation & server atomic persistence when signed in)
+  const submitTrade = async (trade: Trade): Promise<boolean> => {
     if (placementInProgressRef.current) return false;
     placementInProgressRef.current = true;
     try {
@@ -219,9 +223,16 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       activeTradesRef.current = nextActive;
       setActiveTrades(nextActive);
       audioEffects.playTradePlaced();
+      if (!trade.botId) {
+        showToast(
+          'success',
+          'Trade Placed',
+          `Position opened: ${trade.contractType} $${trade.stake.toFixed(2)} @ ${trade.entryPrice.toFixed(selectedMarketRef.current.decimals)}`
+        );
+      }
       return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not place simulated trade.';
+      const message = error instanceof Error ? error.message : 'Could not place trade.';
       if (botStatusRef.current === 'running') {
         botStatusRef.current = 'stopped';
         setBotStatus('stopped');
@@ -279,10 +290,15 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     // 2.5 Protected Administrator Risk-Limit Enforcement
     const rs = adminRiskRef.current;
     if (rs && rs.enabled) {
-      if (rs.halted || rs.consecutiveLosses >= rs.maxConsecutiveLosses) {
+      if (
+        rs.halted ||
+        rs.totalLosses >= rs.maxTotalLosses ||
+        rs.consecutiveLosses >= rs.maxConsecutiveLosses ||
+        rs.cumulativeLoss >= rs.configuredMaxLoss
+      ) {
         const msg =
           rs.haltReason ||
-          'Maximum 3 consecutive losing trades reached. Automated trading halted until manual restart.';
+          'Administrator risk protection halted automated trading. Manual intervention is required to continue.';
         botStatusRef.current = 'stopped';
         setBotStatus('stopped');
         setBotPhase('HALTED');
@@ -309,7 +325,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       return;
     }
 
-    // 4. Signal confirmed -> execute simulated trade anchored to continuous quote
+    // 4. Signal confirmed -> execute order anchored to continuous market quote
     const latestPrice = prices[prices.length - 1];
     const payoutRate = market.payoutRate || 0.95;
     const potentialProfit = Number((cfg.stake * payoutRate).toFixed(2));
@@ -337,7 +353,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     };
 
     setBotPhase('IN POSITION');
-    void submitSimulatedTrade(newTrade);
+    void submitTrade(newTrade);
   };
 
   // Synchronously apply a market selection so refs & chart seed update immediately (avoids race on Auto Setup -> Start Bot)
@@ -503,6 +519,17 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
     setBotPhase('ANALYZING');
   }, [completedTrades]);
 
+  const handleResetRiskPeriod = async (maxLossOverride?: number) => {
+    const rs = await authClient.resetRiskControlPeriod(maxLossOverride);
+    if (rs) {
+      adminRiskRef.current = rs;
+      setAdminRiskState(rs);
+    }
+    setStopReason('');
+    setBotPhase('IDLE');
+    showToast('success', 'Risk Period Reset', 'Period loss counters cleared for protected administrator.');
+  };
+
   // Bot Controls
   const handleStartBot = async (cfg: BotConfig) => {
     try {
@@ -511,6 +538,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Could not start protected bot session.';
+      setStopReason(msg);
       showToast('error', 'Bot Not Started', msg);
       return;
     }
@@ -614,7 +642,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
       strategyName: 'Manual Execution',
     };
 
-    void submitSimulatedTrade(newTrade);
+    void submitTrade(newTrade);
   };
 
   const availableBalance =
@@ -788,6 +816,8 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
               isScanning={false}
               activeTradesCount={activeTrades.length}
               onManualTrade={handleManualTrade}
+              adminRiskState={adminRiskState}
+              onResetRiskPeriod={handleResetRiskPeriod}
             />
 
             {activeTrades.length > 0 && (
@@ -795,7 +825,7 @@ export const TradeWorkspace: React.FC<TradeWorkspaceProps> = ({
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] font-mono font-semibold text-cyan-300 flex items-center gap-1.5">
                     <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
-                    <span>Active Contracts ({activeTrades.length})</span>
+                    <span>Active Positions ({activeTrades.length})</span>
                   </span>
                   <button
                     type="button"

@@ -83,7 +83,7 @@ export const MonteCarloSimulation: React.FC<MonteCarloSimulationProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-slate-800">
         <div>
           <h4 className="font-semibold text-slate-100 text-xs">
-            Monte Carlo Multi-Path Stress Simulation (200 Iterations)
+            Monte Carlo Multi-Path Stress Analysis (200 Iterations)
           </h4>
           <p className="text-[11px] text-slate-400 mt-0.5">
             Evaluates sequence-of-returns volatility under randomized streak distributions

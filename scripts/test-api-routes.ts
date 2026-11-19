@@ -1,7 +1,11 @@
 import http from 'node:http';
 import assert from 'node:assert';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import app from '../backend';
 import { localFallbackStore } from '../server/localFallbackStore';
+import { adminRiskStore, isProtectedAdminUser } from '../server/adminRiskStore';
 
 async function runTests() {
   console.log('--- Starting API Route & Auth Verification Tests ---');
@@ -461,8 +465,356 @@ async function runTests() {
       (globalThis as any).window = origWindow;
     }
 
+    // Test 11: Exclusive Protected Admin Loss Protection (3 Consecutive, 5 Total, Max Loss, Concurrency, Demo & Real, Persistence, Non-Admin Isolation)
+    console.log('\n[Test 11] Testing exclusive francisgraham admin risk protection rules...');
+    assert.strictEqual(
+      isProtectedAdminUser({ role: 'admin', email: 'francisgraham071@gmail.com' }),
+      true,
+      'francisgraham071@gmail.com admin must be protected'
+    );
+    assert.strictEqual(
+      isProtectedAdminUser({ role: 'user', email: 'francisgraham071@gmail.com' }),
+      false,
+      'Non-admin user must not be treated as protected admin'
+    );
+
+    const adminSuffix = Date.now().toString().slice(-6);
+    const ephemeralAdminId = `adm_risk_${adminSuffix}`;
+    const ephemeralAdminEmail = `francisgraham_test_${adminSuffix}@example.com`;
+    const ephemeralAdminPass = 'RiskTestPass2026!';
+    const ephemeralSalt = crypto.randomBytes(16).toString('hex');
+    const ephemeralHash = `scrypt:${ephemeralSalt}:${crypto.scryptSync(ephemeralAdminPass, ephemeralSalt, 64).toString('hex')}`;
+
+    localFallbackStore.insertUser({
+      id: ephemeralAdminId,
+      email: ephemeralAdminEmail,
+      phone: `+254799${adminSuffix}`,
+      password_hash: ephemeralHash,
+      role: 'admin',
+      email_verified: true,
+      phone_verified: true,
+      demo_balance: 10000,
+      real_balance: 500,
+      full_name: 'Francis Graham Test',
+      country: 'Kenya',
+      sound_enabled: true,
+      theme: 'dark',
+      created_at: Date.now(),
+    });
+
+    try {
+      const admLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: ephemeralAdminEmail, password: ephemeralAdminPass }),
+      });
+      assert.strictEqual(admLoginRes.status, 200, 'Expected ephemeral protected admin login to succeed');
+      const admToken = (await admLoginRes.json()).token as string;
+      const admHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${admToken}`,
+      };
+
+      const makeTrade = (id: string, mode: 'demo' | 'real', stake: number) => ({
+        id,
+        symbol: 'R_100',
+        contractType: 'CALL',
+        stake,
+        payoutRate: 0.95,
+        potentialPayout: Number((stake * 1.95).toFixed(2)),
+        entryTime: Date.now(),
+        entryPrice: 1000.25,
+        status: 'active',
+        profitLoss: 0,
+        mode,
+        durationTicks: 1,
+        remainingTicks: 1,
+        ticksRecorded: [1000.25],
+      });
+
+      const settleTradeReq = async (tradeId: string, status: 'won' | 'lost', stake: number) => {
+        const profitLoss = status === 'won' ? Number((stake * 0.95).toFixed(2)) : -stake;
+        const r = await fetch(`${baseUrl}/api/user/trades/${encodeURIComponent(tradeId)}/settle`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({
+            status,
+            stake,
+            profitLoss,
+            exitPrice: status === 'won' ? 1001.1 : 999.4,
+            exitTime: Date.now(),
+            ticksRecorded: [1000.25, status === 'won' ? 1001.1 : 999.4],
+          }),
+        });
+        assert.strictEqual(r.status, 200, `Expected 200 settling ${tradeId}, got ${r.status}`);
+        return r.json();
+      };
+
+      // 11A: Start bot session with Max Loss = $20 -> 3 consecutive losses ($2 each) halts trading until manual restart
+      const start1 = await fetch(`${baseUrl}/api/user/risk-protection/start`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ maxLoss: 20, mode: 'demo' }),
+      });
+      assert.strictEqual(start1.status, 200);
+
+      for (let i = 1; i <= 3; i++) {
+        const tid = `adm_c_${adminSuffix}_${i}`;
+        const p = await fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: makeTrade(tid, 'demo', 2), mode: 'demo' }),
+        });
+        assert.strictEqual(p.status, 201, `Trade ${i} of 3 should be allowed`);
+        const s = await settleTradeReq(tid, 'lost', 2);
+        if (i < 3) {
+          assert.strictEqual(s.riskState.halted, false);
+        } else {
+          assert.strictEqual(s.riskState.consecutiveLosses, 3);
+          assert.strictEqual(s.riskState.totalLosses, 3);
+          assert.strictEqual(s.riskState.halted, true);
+          assert.strictEqual(s.riskState.haltCode, 'MAX_CONSECUTIVE_LOSSES');
+        }
+      }
+
+      // 4th trade blocked in BOTH demo and real modes while halted
+      const blocked4Demo = await fetch(`${baseUrl}/api/user/trades/place`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ trade: makeTrade(`adm_c4d_${adminSuffix}`, 'demo', 2), mode: 'demo' }),
+      });
+      assert.strictEqual(blocked4Demo.status, 403, '4th trade after 3 consecutive losses must be blocked in demo');
+
+      const blocked4Real = await fetch(`${baseUrl}/api/user/trades/place`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ trade: makeTrade(`adm_c4r_${adminSuffix}`, 'real', 2), mode: 'real' }),
+      });
+      assert.strictEqual(blocked4Real.status, 403, '4th trade after 3 consecutive losses must be blocked in real mode too');
+
+      // Reload from disk (simulate server restart/refresh) -> lock & counters must persist
+      adminRiskStore.reloadFromDiskForTests();
+      const afterReloadRes = await fetch(`${baseUrl}/api/user/risk-protection`, { headers: admHeaders });
+      const afterReloadJson = await afterReloadRes.json();
+      assert.strictEqual(afterReloadJson.riskState.halted, true, 'Halt must survive server restart');
+      assert.strictEqual(afterReloadJson.riskState.consecutiveLosses, 3);
+      assert.strictEqual(afterReloadJson.riskState.totalLosses, 3);
+
+      // 11B: Manual restart clears consecutiveLosses to 0, preserves totalLosses=3 & cumulativeLoss=$6, cannot inflate maxLoss
+      const restart1 = await fetch(`${baseUrl}/api/user/risk-protection/start`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ maxLoss: 500, mode: 'demo' }), // Attempt to inflate maxLoss must be capped to 20
+      });
+      assert.strictEqual(restart1.status, 200);
+      const restart1Json = await restart1.json();
+      assert.strictEqual(restart1Json.riskState.consecutiveLosses, 0, 'Manual restart resets consecutive losses');
+      assert.strictEqual(restart1Json.riskState.totalLosses, 3, 'Manual restart must preserve totalLosses in period');
+      assert.strictEqual(restart1Json.riskState.configuredMaxLoss, 20, 'Mid-period maxLoss must not inflate above $20');
+
+      // Lose #4 ($2), then WIN ($2 -> +$1.90) resets consecutiveLosses to 0 while keeping totalLosses=4
+      const tid4 = `adm_t4_${adminSuffix}`;
+      assert.strictEqual(
+        (await fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: makeTrade(tid4, 'demo', 2), mode: 'demo' }),
+        })).status,
+        201
+      );
+      await settleTradeReq(tid4, 'lost', 2);
+
+      const tidWin = `adm_win_${adminSuffix}`;
+      assert.strictEqual(
+        (await fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: makeTrade(tidWin, 'demo', 2), mode: 'demo' }),
+        })).status,
+        201
+      );
+      const winSettled = await settleTradeReq(tidWin, 'won', 2);
+      assert.strictEqual(winSettled.riskState.consecutiveLosses, 0, 'Winning trade must reset consecutiveLosses');
+      assert.strictEqual(winSettled.riskState.totalLosses, 4, 'Winning trade must preserve totalLosses=4');
+
+      // Concurrent flood test when 4 total losses already recorded: only 1 trade can reserve, 2nd concurrent trade MUST be rejected
+      const concA = makeTrade(`adm_concA_${adminSuffix}`, 'demo', 2);
+      const concB = makeTrade(`adm_concB_${adminSuffix}`, 'demo', 2);
+      const [concResA, concResB] = await Promise.all([
+        fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: concA, mode: 'demo' }),
+        }),
+        fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: concB, mode: 'demo' }),
+        }),
+      ]);
+      const statuses = [concResA.status, concResB.status].sort();
+      assert.deepStrictEqual(statuses, [201, 409], 'Concurrent guard must permit 1 and reject 2nd to prevent >5 total losses');
+
+      // Settle the accepted 5th losing trade -> triggers MAX_TOTAL_LOSSES lock!
+      const acceptedConcId = concResA.status === 201 ? concA.id : concB.id;
+      const settle5 = await settleTradeReq(acceptedConcId, 'lost', 2);
+      assert.strictEqual(settle5.riskState.totalLosses, 5);
+      assert.strictEqual(settle5.riskState.halted, true);
+      assert.strictEqual(settle5.riskState.haltCode, 'MAX_TOTAL_LOSSES');
+
+      // Attempting manual Start after 5 total losses MUST be blocked (403) across restarts
+      adminRiskStore.reloadFromDiskForTests();
+      const blockedRestart5 = await fetch(`${baseUrl}/api/user/risk-protection/start`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ maxLoss: 20, mode: 'demo' }),
+      });
+      assert.strictEqual(blockedRestart5.status, 403, 'Manual start must be blocked after 5 total losses');
+
+      // Ordinary user must get 403 calling reset-period
+      const nonAdminReset = await fetch(`${baseUrl}/api/user/risk-protection/reset-period`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${reloginJson.token}`,
+        },
+        body: JSON.stringify({ confirmReset: true }),
+      });
+      assert.strictEqual(nonAdminReset.status, 403, 'Ordinary user must not reset admin risk period');
+
+      // Authorized admin period reset clears MAX_TOTAL_LOSSES lock cleanly
+      const authReset = await fetch(`${baseUrl}/api/user/risk-protection/reset-period`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ confirmReset: true, maxLoss: 10 }),
+      });
+      assert.strictEqual(authReset.status, 200, 'Protected admin period reset must succeed');
+      const authResetJson = await authReset.json();
+      assert.strictEqual(authResetJson.riskState.totalLosses, 0);
+      assert.strictEqual(authResetJson.riskState.consecutiveLosses, 0);
+      assert.strictEqual(authResetJson.riskState.halted, false);
+      assert.strictEqual(authResetJson.riskState.configuredMaxLoss, 10);
+
+      // 11C: Hard Max Loss Protection ($10 max loss)
+      await fetch(`${baseUrl}/api/user/risk-protection/start`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ maxLoss: 10, mode: 'demo' }),
+      });
+      // Stake $11 exceeds $10 remaining allowance -> rejected (403)
+      const overStakeRes = await fetch(`${baseUrl}/api/user/trades/place`, {
+        method: 'POST',
+        headers: admHeaders,
+        body: JSON.stringify({ trade: makeTrade(`adm_over_${adminSuffix}`, 'demo', 11), mode: 'demo' }),
+      });
+      assert.strictEqual(overStakeRes.status, 403, 'Trade stake exceeding remaining loss allowance must be rejected');
+
+      // Compliant $10 stake allowed, loses $10 -> hits cumulativeLoss = $10 -> MAX_LOSS_REACHED halt
+      const maxTradeId = `adm_max_${adminSuffix}`;
+      assert.strictEqual(
+        (await fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: admHeaders,
+          body: JSON.stringify({ trade: makeTrade(maxTradeId, 'demo', 10), mode: 'demo' }),
+        })).status,
+        201
+      );
+      const settledMax = await settleTradeReq(maxTradeId, 'lost', 10);
+      assert.strictEqual(settledMax.riskState.cumulativeLoss, 10);
+      assert.strictEqual(settledMax.riskState.halted, true);
+      assert.strictEqual(settledMax.riskState.haltCode, 'MAX_LOSS_REACHED');
+
+      // Also verify direct Real-mode gate enforcement in adminRiskStore when halted and when unhalted
+      const directRealBlocked = await adminRiskStore.withUserLock(ephemeralAdminId, () =>
+        adminRiskStore.validateAndReserveTradeLocked(
+          { id: ephemeralAdminId, email: ephemeralAdminEmail, role: 'admin' },
+          { id: `adm_real_blk_${adminSuffix}`, stake: 2 },
+          'real'
+        )
+      );
+      assert.strictEqual(directRealBlocked.allowed, false, 'Real mode trade must be blocked when admin is halted');
+
+      // Reset period and verify ordinary user is completely unaffected by admin risk limits (can lose 6 times in a row)
+      const normalHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${reloginJson.token}`,
+      };
+      const normalRiskRes = await fetch(`${baseUrl}/api/user/risk-protection`, { headers: normalHeaders });
+      const normalRiskJson = await normalRiskRes.json();
+      assert.strictEqual(normalRiskJson.protected, false);
+      assert.strictEqual(normalRiskJson.riskState, null);
+      for (let i = 1; i <= 6; i++) {
+        const uid = `usr_loss_${adminSuffix}_${i}`;
+        const p = await fetch(`${baseUrl}/api/user/trades/place`, {
+          method: 'POST',
+          headers: normalHeaders,
+          body: JSON.stringify({ trade: makeTrade(uid, 'demo', 2), mode: 'demo' }),
+        });
+        assert.strictEqual(p.status, 201, `Ordinary user trade #${i} must never be blocked by admin limits`);
+        const s = await fetch(`${baseUrl}/api/user/trades/${encodeURIComponent(uid)}/settle`, {
+          method: 'POST',
+          headers: normalHeaders,
+          body: JSON.stringify({
+            status: 'lost',
+            stake: 2,
+            profitLoss: -2,
+            exitPrice: 999.1,
+            exitTime: Date.now(),
+            ticksRecorded: [1000.25, 999.1],
+          }),
+        });
+        assert.strictEqual(s.status, 200);
+      }
+      console.log('✓ Exclusive admin risk protection (3 consecutive, 5 total, max loss, concurrency, persistence, period reset, Demo/Real, non-admin isolation) verified!');
+    } finally {
+      localFallbackStore.deleteUser(ephemeralAdminId);
+      const riskPath = path.resolve(process.cwd(), 'data', 'admin-risk.json');
+      if (fs.existsSync(riskPath)) {
+        try {
+          const raw = JSON.parse(fs.readFileSync(riskPath, 'utf-8'));
+          if (raw?.states?.[ephemeralAdminId]) {
+            delete raw.states[ephemeralAdminId];
+            fs.writeFileSync(riskPath, JSON.stringify(raw, null, 2));
+          }
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+    }
+
+    // Test 12: Verify no user-visible simulation wording remains across active frontend UI components
+    console.log('\n[Test 12] Scanning frontend UI modules for forbidden simulation wording...');
+    const uiFilesToCheck = [
+      'src/App.tsx',
+      'src/data/syntheticMarkets.ts',
+      'src/components/trading/TradeWorkspace.tsx',
+      'src/components/trading/SimpleBotPanel.tsx',
+      'src/components/trading/DemoTrading.tsx',
+      'src/components/trading/MarketSelectorBar.tsx',
+      'src/components/modals/ProviderSettingsModal.tsx',
+      'src/components/modals/DepositModal.tsx',
+      'src/components/modals/ProfileModal.tsx',
+      'src/components/account/AccountPage.tsx',
+      'src/components/dashboard/Dashboard.tsx',
+      'src/components/settings/SettingsPage.tsx',
+      'src/components/backtesting/BacktestEngine.tsx',
+      'src/components/backtesting/MonteCarloSimulation.tsx',
+      'src/components/common/DisclaimerBanner.tsx',
+      'src/components/help/RiskDisclosure.tsx',
+      'src/components/history/TradeHistory.tsx',
+      'src/components/layout/Sidebar.tsx',
+    ];
+    for (const relPath of uiFilesToCheck) {
+      const content = fs.readFileSync(path.resolve(process.cwd(), relPath), 'utf-8');
+      assert.ok(
+        !/simulated|simulation account|virtual balance|virtual demo|practice demo/i.test(content),
+        `Unexpected simulation/virtual/practice wording found in ${relPath}`
+      );
+    }
+    console.log('✓ Zero forbidden simulation wording found in active UI modules!');
+
     console.log('\n========================================');
-    console.log('All API routing and Auth tests PASSED!');
+    console.log('All API, Auth, Risk Protection & UI tests PASSED!');
     console.log('========================================\n');
   } finally {
     if (createdTestUserId) {

@@ -97,7 +97,7 @@ export const TradeHistory: React.FC<TradeHistoryProps> = ({ onNavigate }) => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `stratum_trade_history_${Date.now()}.csv`;
+    link.download = `devoptions_trade_history_${Date.now()}.csv`;
     link.click();
     URL.revokeObjectURL(url);
     showToast('success', 'History Exported', `Exported ${trades.length} trade records.`);

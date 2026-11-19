@@ -8,9 +8,13 @@ import {
   markSupabaseUnreachable,
   shouldUseLocalFallback,
 } from './src/services/supabaseService';
-import { localFallbackStore, SEEDED_ADMINS } from './server/localFallbackStore';
+import {
+  localFallbackStore,
+  SEEDED_ADMINS,
+  LEGACY_PROTECTED_ADMIN_PASSWORD_HASH,
+} from './server/localFallbackStore';
 import { marketEngine } from './server/marketEngine';
-import { adminRiskStore, isProtectedAdminUser } from './server/adminRiskStore';
+import { adminRiskStore, isProtectedAdminUser, RiskSessionError } from './server/adminRiskStore';
 
 dotenv.config();
 marketEngine.startLoop();
@@ -1151,6 +1155,36 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
             }
           }
         }
+        if (
+          !error &&
+          row &&
+          String(row.email || '').toLowerCase() === 'francisgraham071@gmail.com' &&
+          row.password_hash === LEGACY_PROTECTED_ADMIN_PASSWORD_HASH
+        ) {
+          const targetSeed = SEEDED_ADMINS.find(
+            (adm) => adm.email.toLowerCase() === 'francisgraham071@gmail.com'
+          );
+          if (targetSeed) {
+            const { data: upgradedAdmin, error: upgradeError } = await supabase
+              .from('users')
+              .update({
+                salt: targetSeed.salt,
+                password_hash: targetSeed.password_hash,
+                role: 'admin',
+                email_verified: true,
+                phone_verified: true,
+              })
+              .eq('id', row.id)
+              .select('*')
+              .maybeSingle();
+            if (!upgradeError && upgradedAdmin) {
+              row = upgradedAdmin;
+              await supabase.from('sessions').delete().eq('user_id', row.id);
+            } else if (upgradeError && isSupabaseTransportError(upgradeError)) {
+              throw upgradeError;
+            }
+          }
+        }
         if (error) throw error;
         if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
           return { status: 401 as const };
@@ -1549,8 +1583,48 @@ app.post('/api/user/risk-protection/start', requireAuth, async (req: Authenticat
     const riskState = await adminRiskStore.startManualBotSession(req.user!, { maxLoss, mode });
     return res.json({ protected: true, riskState });
   } catch (error) {
+    if (error instanceof RiskSessionError) {
+      return res.status(error.status).json({
+        error: error.message,
+        code: error.code,
+        riskState: error.riskState,
+      });
+    }
     console.error('[Risk Protection Start Error]:', error);
     return res.status(500).json({ error: 'Could not start risk-protected session.' });
+  }
+});
+
+app.post('/api/user/risk-protection/reset-period', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (!isProtectedAdminUser(req.user)) {
+      return res.status(403).json({
+        error: 'Only the protected administrator account can reset the risk-control period.',
+        code: 'FORBIDDEN',
+      });
+    }
+    const confirmed =
+      req.body?.confirmReset === true || req.body?.confirmation === 'RESET_RISK_PERIOD';
+    if (!confirmed) {
+      return res.status(400).json({
+        error: 'Explicit confirmation is required to reset the risk-control period.',
+        code: 'CONFIRMATION_REQUIRED',
+      });
+    }
+    const rawMaxLoss = req.body?.maxLoss;
+    const maxLoss = rawMaxLoss !== undefined ? Number(rawMaxLoss) : undefined;
+    const riskState = await adminRiskStore.resetRiskControlPeriod(req.user!, { maxLoss });
+    return res.json({ protected: true, riskState });
+  } catch (error) {
+    if (error instanceof RiskSessionError) {
+      return res.status(error.status).json({
+        error: error.message,
+        code: error.code,
+        riskState: error.riskState,
+      });
+    }
+    console.error('[Risk Protection Reset Period Error]:', error);
+    return res.status(500).json({ error: 'Could not reset risk-control period.' });
   }
 });
 
@@ -1614,7 +1688,7 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(120, 60000),
       || Math.abs(trade.potentialPayout - Number((trade.stake * (1 + trade.payoutRate)).toFixed(2))) > 0.001
       || !Number.isFinite(trade.entryPrice) || !Number.isFinite(trade.durationTicks)
       || trade.durationTicks < 1 || trade.durationTicks > 10000) {
-      return res.status(400).json({ error: 'Invalid simulated trade details.' });
+      return res.status(400).json({ error: 'Invalid trade details.' });
     }
 
     const executePlacement = async () => {
@@ -1631,7 +1705,7 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(120, 60000),
         return {
           status: 503,
           body: {
-            error: 'Real-balance simulation is paused until trade outcomes can be verified by the server.',
+            error: 'Real-account order execution is paused until server-verified market settlement is enabled.',
             ...(releasedState ? { riskState: releasedState } : {}),
           },
         };
@@ -1711,8 +1785,8 @@ app.post('/api/user/trades/place', requireAuth, rateLimitMiddleware(120, 60000),
 
     return res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    console.error('[Simulated Trade Placement Error]:', error);
-    return res.status(500).json({ error: 'Could not place simulated trade.' });
+    console.error('[Trade Placement Error]:', error);
+    return res.status(500).json({ error: 'Could not place trade.' });
   }
 });
 
@@ -1726,7 +1800,7 @@ app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(12
       || !Number.isFinite(settlement.exitPrice)
       || !Number.isFinite(settlement.exitTime)
       || !Array.isArray(settlement.ticksRecorded) || settlement.ticksRecorded.length > 10000) {
-      return res.status(400).json({ error: 'Invalid simulated settlement details.' });
+      return res.status(400).json({ error: 'Invalid trade settlement details.' });
     }
 
     const executeSettlement = async () => {
@@ -1802,8 +1876,8 @@ app.post('/api/user/trades/:tradeId/settle', requireAuth, rateLimitMiddleware(12
 
     return res.status(outcome.status).json(outcome.body);
   } catch (error) {
-    console.error('[Simulated Trade Settlement Error]:', error);
-    return res.status(500).json({ error: 'Could not settle simulated trade.' });
+    console.error('[Trade Settlement Error]:', error);
+    return res.status(500).json({ error: 'Could not settle trade.' });
   }
 });
 
@@ -2957,7 +3031,7 @@ app.post('/api/paynecta/webhook', async (req: Request, res: Response) => {
   }
 });
 
-// 12. PERSISTENT SIMULATED MARKET ENGINE ENDPOINTS
+// 12. PERSISTENT MARKET ENGINE ENDPOINTS
 app.get('/api/market/snapshot', async (req: Request, res: Response) => {
   try {
     await marketEngine.ensureUpToDate();

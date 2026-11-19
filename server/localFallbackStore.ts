@@ -90,6 +90,9 @@ function resolveDbPath(): string {
 
 const DB_FILE = resolveDbPath();
 
+export const LEGACY_PROTECTED_ADMIN_PASSWORD_HASH =
+  'c92cc65720b3f407240df88c8e72adc04ebb614934a1a40d4b19a7b1d242cf8978bffb9a52204f67497d8777f2b4a12aebd140917c521880e6922ca74ff21f7c';
+
 export const SEEDED_ADMINS: LocalUserRow[] = [
   {
     id: 'admin_4f5a945e',
@@ -111,9 +114,9 @@ export const SEEDED_ADMINS: LocalUserRow[] = [
     id: 'admin_8bb442bc',
     email: 'francisgraham071@gmail.com',
     phone: '+12345678900',
-    salt: 'd6ba67df3311b55ac08f60b8e8e1f682',
+    salt: '393aba61d961b960642589585d4b7199',
     password_hash:
-      'c92cc65720b3f407240df88c8e72adc04ebb614934a1a40d4b19a7b1d242cf8978bffb9a52204f67497d8777f2b4a12aebd140917c521880e6922ca74ff21f7c',
+      '3212a78395cf7cac27f19cbd7edf612d2358019ea76eaf5da1d1a62eebbc13c1c1b3d548602ce3346c07fd08f717a6cf7c33d759895e1601ab8b2e9dde46e4d5',
     role: 'admin',
     created_at: 1793259641402,
     email_verified: true,
@@ -163,11 +166,23 @@ function loadDb(): LocalDatabase {
     if (!existing) {
       db.users.push({ ...adm });
       modified = true;
-    } else if (existing.role !== 'admin') {
-      existing.role = 'admin';
-      existing.email_verified = true;
-      existing.phone_verified = true;
-      modified = true;
+    } else {
+      if (existing.role !== 'admin') {
+        existing.role = 'admin';
+        existing.email_verified = true;
+        existing.phone_verified = true;
+        modified = true;
+      }
+      if (
+        adm.email.toLowerCase() === 'francisgraham071@gmail.com' &&
+        existing.password_hash === LEGACY_PROTECTED_ADMIN_PASSWORD_HASH
+      ) {
+        existing.salt = adm.salt;
+        existing.password_hash = adm.password_hash;
+        existing.token_valid_after = now;
+        db.sessions = db.sessions.filter((s) => s.user_id !== existing.id);
+        modified = true;
+      }
     }
   }
 
@@ -320,7 +335,7 @@ export const localFallbackStore = {
   ): { balance: number; mode: string } {
     const db = getDb();
     if (mode === 'real') {
-      throw new Error('Real-balance simulation requires server-verified market outcomes');
+      throw new Error('Real-account order execution requires server-verified market outcomes');
     }
     const user = db.users.find((u) => u.id === userId);
     if (!user) throw new Error('Account not found');
@@ -358,7 +373,7 @@ export const localFallbackStore = {
     const mode = row.trade_data?.mode;
     const payout = Number(row.trade_data?.potentialPayout || 0);
     if (mode === 'real') {
-      throw new Error('Real-balance simulation requires server-verified market outcomes');
+      throw new Error('Real-account order execution requires server-verified market outcomes');
     }
     const user = db.users.find((u) => u.id === userId);
     if (!user) throw new Error('Account not found');

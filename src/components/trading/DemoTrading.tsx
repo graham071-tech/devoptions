@@ -239,7 +239,7 @@ export const DemoTrading: React.FC<DemoTradingProps> = ({
     const updated = storage.resetDemoBalance(10000.0);
     onUpdateProfile(updated);
     audioEffects.playTradePlaced();
-    showToast('success', 'Demo Funds Restored', 'Virtual balance reset to $10,000.00 USD.');
+    showToast('success', 'Demo Funds Restored', 'Available demo balance reset to $10,000.00 USD.');
   };
 
   const payoutAmount = (stake * selectedMarket.payoutRate).toFixed(2);

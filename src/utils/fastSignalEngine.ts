@@ -1,5 +1,5 @@
 /**
- * Fast, lightweight rolling technical analysis engine for automated simulated trading.
+ * Fast, lightweight rolling technical analysis engine for automated trading.
  * Runs in O(n) over a bounded window (<= 60 points) with zero heavy allocations.
  */
 

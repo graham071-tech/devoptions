@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { ContractType, Market } from '../../types/trading';
 import { storage } from '../../services/storage';
+import { AdminRiskState } from '../../services/authClient';
 import {
   Play,
   Square,
   AlertTriangle,
   ShieldAlert,
+  ShieldCheck,
+  RotateCcw,
   Sliders,
   Info,
   OctagonAlert,
@@ -65,6 +68,8 @@ interface SimpleBotPanelProps {
   isScanning: boolean;
   activeTradesCount: number;
   onManualTrade?: (type: ContractType, stake?: number, durationTicks?: number) => void;
+  adminRiskState?: AdminRiskState | null;
+  onResetRiskPeriod?: (maxLoss?: number) => Promise<void>;
 }
 
 export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
@@ -86,6 +91,8 @@ export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
   onScanAndTradeForMe,
   activeTradesCount,
   onManualTrade,
+  adminRiskState,
+  onResetRiskPeriod,
 }) => {
   const [initialPrefs] = useState(() => storage.getBotPreferences());
   const [executionMode, setExecutionMode] = useState<TradingExecutionMode>(initialPrefs.executionMode);
@@ -97,6 +104,8 @@ export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
   const [durationTicks, setDurationTicks] = useState<number>(initialPrefs.durationTicks);
   const [validationError, setValidationError] = useState<string>('');
   const [isMarketDropdownOpen, setIsMarketDropdownOpen] = useState<boolean>(false);
+  const [confirmingPeriodReset, setConfirmingPeriodReset] = useState<boolean>(false);
+  const [resettingPeriod, setResettingPeriod] = useState<boolean>(false);
 
   useEffect(() => {
     storage.saveBotPreferences({
@@ -131,12 +140,54 @@ export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
     setMaxLoss((prev) => Math.max(1, prev + delta));
   };
 
+  const hasPeriodLock = Boolean(
+    adminRiskState?.enabled &&
+      (adminRiskState.totalLosses >= adminRiskState.maxTotalLosses ||
+        adminRiskState.haltCode === 'MAX_TOTAL_LOSSES' ||
+        adminRiskState.cumulativeLoss >= adminRiskState.configuredMaxLoss ||
+        adminRiskState.haltCode === 'MAX_LOSS_REACHED')
+  );
+
+  const handleConfirmPeriodReset = async () => {
+    if (!onResetRiskPeriod || resettingPeriod) return;
+    setResettingPeriod(true);
+    setValidationError('');
+    try {
+      await onResetRiskPeriod(maxLoss);
+      setConfirmingPeriodReset(false);
+    } catch (err) {
+      setValidationError(err instanceof Error ? err.message : 'Could not reset risk period.');
+    } finally {
+      setResettingPeriod(false);
+    }
+  };
+
   const handleStart = () => {
     setValidationError('');
 
     if (tradingMode === 'real') {
       setValidationError('Switch to Demo account to run the automated bot.');
       return;
+    }
+    if (adminRiskState?.enabled) {
+      if (adminRiskState.totalLosses >= adminRiskState.maxTotalLosses || adminRiskState.haltCode === 'MAX_TOTAL_LOSSES') {
+        setValidationError(
+          'Maximum 5 total losing trades reached for this risk-control period. Reset the risk period before restarting.'
+        );
+        return;
+      }
+      if (adminRiskState.cumulativeLoss >= adminRiskState.configuredMaxLoss || adminRiskState.haltCode === 'MAX_LOSS_REACHED') {
+        setValidationError(
+          `Maximum loss threshold reached ($${adminRiskState.cumulativeLoss.toFixed(2)} / $${adminRiskState.configuredMaxLoss.toFixed(2)}). Reset the risk period before restarting.`
+        );
+        return;
+      }
+      if (stake > adminRiskState.remainingLossAllowance) {
+        setValidationError(
+          `Stake ($${stake.toFixed(2)}) exceeds remaining max loss allowance ($${adminRiskState.remainingLossAllowance.toFixed(2)}).`
+        );
+        return;
+      }
     }
     if (targetProfit <= 0 || isNaN(targetProfit)) {
       setValidationError('Please enter a positive Target Profit amount ($).');
@@ -166,6 +217,20 @@ export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
 
   const handleManualClick = (type: ContractType) => {
     setValidationError('');
+    if (adminRiskState?.enabled) {
+      if (adminRiskState.halted) {
+        setValidationError(
+          adminRiskState.haltReason || 'Risk protection has locked trading until manual intervention.'
+        );
+        return;
+      }
+      if (stake > adminRiskState.remainingLossAllowance) {
+        setValidationError(
+          `Trade blocked: stake ($${stake.toFixed(2)}) exceeds remaining max loss allowance ($${adminRiskState.remainingLossAllowance.toFixed(2)}).`
+        );
+        return;
+      }
+    }
     if (stake < (market.minStake || 1)) {
       setValidationError(`Minimum stake for ${market.displayName} is $${market.minStake || 1}.00.`);
       return;
@@ -570,19 +635,100 @@ export const SimpleBotPanel: React.FC<SimpleBotPanelProps> = ({
         </div>
       </div>
 
+      {/* Exclusive Admin Risk Guard Summary */}
+      {adminRiskState?.enabled && (
+        <div
+          className={`p-2 rounded-md border space-y-1.5 text-[10px] font-mono ${
+            adminRiskState.halted
+              ? 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+              : 'bg-slate-950/90 border-cyan-500/25 text-slate-300'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1 font-semibold uppercase tracking-wider text-cyan-300">
+              {adminRiskState.halted ? (
+                <ShieldAlert className="w-3 h-3 text-rose-400 shrink-0" />
+              ) : (
+                <ShieldCheck className="w-3 h-3 text-emerald-400 shrink-0" />
+              )}
+              <span>Admin Risk Guard</span>
+            </span>
+            <span className="text-[9px] text-slate-400">
+              Rem: ${adminRiskState.remainingLossAllowance.toFixed(2)}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 text-[9px] tabular-nums">
+            <div className="px-1.5 py-1 rounded bg-slate-900/90 border border-slate-800">
+              <span className="text-slate-500 block">Streak</span>
+              <span className="font-semibold text-slate-100">
+                {adminRiskState.consecutiveLosses}/{adminRiskState.maxConsecutiveLosses}
+              </span>
+            </div>
+            <div className="px-1.5 py-1 rounded bg-slate-900/90 border border-slate-800">
+              <span className="text-slate-500 block">Period Losses</span>
+              <span className="font-semibold text-slate-100">
+                {adminRiskState.totalLosses}/{adminRiskState.maxTotalLosses}
+              </span>
+            </div>
+            <div className="px-1.5 py-1 rounded bg-slate-900/90 border border-slate-800">
+              <span className="text-slate-500 block">Max Loss</span>
+              <span className="font-semibold text-slate-100">
+                ${adminRiskState.cumulativeLoss.toFixed(0)}/${adminRiskState.configuredMaxLoss.toFixed(0)}
+              </span>
+            </div>
+          </div>
+
+          {onResetRiskPeriod && (adminRiskState.halted || adminRiskState.totalLosses > 0 || adminRiskState.cumulativeLoss > 0) && (
+            <div className="pt-0.5">
+              {!confirmingPeriodReset ? (
+                <button
+                  type="button"
+                  disabled={isRunning || activeTradesCount > 0}
+                  onClick={() => setConfirmingPeriodReset(true)}
+                  className="w-full py-1 px-2 rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-40 border border-slate-700/80 text-cyan-300 font-semibold text-[9px] uppercase flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                >
+                  <RotateCcw className="w-2.5 h-2.5" />
+                  <span>Reset Risk Period</span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    disabled={resettingPeriod}
+                    onClick={handleConfirmPeriodReset}
+                    className="flex-1 py-1 px-2 rounded bg-amber-600 hover:bg-amber-500 text-slate-950 font-bold text-[9px] uppercase cursor-pointer"
+                  >
+                    {resettingPeriod ? 'Resetting...' : 'Confirm Reset'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={resettingPeriod}
+                    onClick={() => setConfirmingPeriodReset(false)}
+                    className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[9px] uppercase cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 8. Execution Actions */}
       {executionMode === 'automated' ? (
         <div className="flex items-center gap-1.5 w-full">
           <button
             type="button"
             onClick={handleStart}
-            disabled={isRunning}
+            disabled={isRunning || hasPeriodLock}
             className={`flex-1 min-w-0 h-8 flex items-center justify-center gap-1 px-2 rounded-md border font-semibold text-[11px] uppercase tracking-wide transition-colors cursor-pointer ${
-              isRunning
+              isRunning || hasPeriodLock
                 ? 'bg-slate-900 text-slate-500 border-slate-800 cursor-not-allowed opacity-60'
                 : 'bg-emerald-600 hover:bg-emerald-500 border-emerald-500/40 text-white'
             }`}
-            title="Start high-speed automated trading"
+            title={hasPeriodLock ? 'Reset risk-control period before restarting' : 'Start automated trading'}
           >
             <Play className="w-3 h-3 fill-current shrink-0" />
             <span className="truncate">Start</span>

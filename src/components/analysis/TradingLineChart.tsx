@@ -16,7 +16,7 @@ interface TradingLineChartProps {
   height?: number;
   activeTrades?: Trade[];
   isWsConnected?: boolean;
-  dataSource?: 'live' | 'demo' | 'simulated';
+  dataSource?: 'live' | 'demo';
   timeframe?: string;
   onTimeframeChange?: (tf: string) => void;
 }

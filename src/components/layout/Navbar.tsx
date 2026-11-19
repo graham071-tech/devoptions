@@ -30,7 +30,7 @@ interface NavbarProps {
   activePositionsCount?: number;
   profile: UserProfile;
   isWsConnected: boolean;
-  dataSource: 'live' | 'demo' | 'simulated';
+  dataSource: 'live' | 'demo';
   tradingMode: 'demo' | 'real';
   onToggleTradingMode: (mode: 'demo' | 'real') => void;
   latencyMs: number;

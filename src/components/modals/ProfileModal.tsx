@@ -74,7 +74,7 @@ export const ProfileModal: React.FC<ProfileModalProps> = ({
   const handleResetDemo = () => {
     const updated = storage.resetDemoBalance(10000.0);
     onProfileUpdate(updated);
-    showToast('info', 'Demo Balance Reset', 'Virtual balance restored to $10,000.00 USD.');
+    showToast('info', 'Demo Balance Reset', 'Available demo balance restored to $10,000.00 USD.');
   };
 
   return (

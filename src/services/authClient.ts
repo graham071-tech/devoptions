@@ -95,6 +95,8 @@ export interface AdminRiskState {
   enabled: boolean;
   consecutiveLosses: number;
   maxConsecutiveLosses: number;
+  totalLosses: number;
+  maxTotalLosses: number;
   configuredMaxLoss: number;
   sessionNetPnl: number;
   cumulativeLoss: number;
@@ -102,9 +104,11 @@ export interface AdminRiskState {
   remainingLossAllowance: number;
   halted: boolean;
   haltReason: string | null;
-  haltCode: 'MAX_CONSECUTIVE_LOSSES' | 'MAX_LOSS_REACHED' | null;
+  haltCode: 'MAX_CONSECUTIVE_LOSSES' | 'MAX_TOTAL_LOSSES' | 'MAX_LOSS_REACHED' | null;
   activeMode: 'demo' | 'real';
   botRunning: boolean;
+  periodStartedAt: number;
+  periodResetCount: number;
   updatedAt: number;
 }
 
@@ -1197,10 +1201,32 @@ export class AuthClient {
       { 'Content-Type': 'application/json' }
     );
     const data = await this.readResponse(res);
+    if (data.riskState !== undefined) {
+      this.setRiskState(data.riskState as AdminRiskState | null);
+    }
     if (!res.ok) throw new Error(data.error || 'Could not initialize risk-protected session');
-    const rs = (data.riskState as AdminRiskState | null) ?? null;
-    this.setRiskState(rs);
-    return rs;
+    return (data.riskState as AdminRiskState | null) ?? null;
+  }
+
+  public async resetRiskControlPeriod(maxLoss?: number): Promise<AdminRiskState | null> {
+    if (!this.isAuthenticated()) throw new Error('Authentication required');
+    const res = await this.authorizedFetch(
+      '/api/user/risk-protection/reset-period',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmReset: true,
+          ...(maxLoss !== undefined ? { maxLoss } : {}),
+        }),
+      },
+      { 'Content-Type': 'application/json' }
+    );
+    const data = await this.readResponse(res);
+    if (data.riskState !== undefined) {
+      this.setRiskState(data.riskState as AdminRiskState | null);
+    }
+    if (!res.ok) throw new Error(data.error || 'Could not reset risk-control period');
+    return (data.riskState as AdminRiskState | null) ?? null;
   }
 
   public async stopBotRiskSession(): Promise<AdminRiskState | null> {

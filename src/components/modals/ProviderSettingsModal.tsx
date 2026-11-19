@@ -44,7 +44,7 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
   const [customWsUrl, setCustomWsUrl] = useState<string>(
     currentConfig.customWsUrl || ''
   );
-  const [executionMode, setExecutionMode] = useState<'simulated' | 'external_api'>('simulated');
+  const [executionMode, setExecutionMode] = useState<'demo_engine' | 'external_api'>('demo_engine');
   const [customExecEndpoint, setCustomExecEndpoint] = useState<string>('');
   const [customApiKey, setCustomApiKey] = useState<string>('');
 
@@ -212,25 +212,25 @@ export const ProviderSettingsModal: React.FC<ProviderSettingsModalProps> = ({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {/* Option A: Practice Execution */}
+              {/* Option A: Demo Execution */}
               <div
-                onClick={() => setExecutionMode('simulated')}
+                onClick={() => setExecutionMode('demo_engine')}
                 className={`p-3 rounded-xl border cursor-pointer transition-all ${
-                  executionMode === 'simulated'
+                  executionMode === 'demo_engine'
                     ? 'bg-emerald-950/30 border-emerald-400 shadow-sm'
                     : 'bg-slate-900/50 border-slate-800 hover:border-slate-700'
                 }`}
               >
                 <div className="flex items-center justify-between pb-1">
-                  <span className="font-bold text-slate-200">Practice Execution Engine</span>
+                  <span className="font-bold text-slate-200">Demo Execution Engine</span>
                   <span
                     className={`w-3 h-3 rounded-full border-2 ${
-                      executionMode === 'simulated' ? 'border-emerald-400 bg-emerald-400' : 'border-slate-600'
+                      executionMode === 'demo_engine' ? 'border-emerald-400 bg-emerald-400' : 'border-slate-600'
                     }`}
                   />
                 </div>
                 <p className="text-[10px] text-slate-400 leading-relaxed">
-                  Practice trading execution engine with zero financial risk. Standard safe environment for algorithmic testing.
+                  Risk-free Demo trading execution engine without live broker routing. Standard environment for algorithmic testing.
                 </p>
               </div>
 

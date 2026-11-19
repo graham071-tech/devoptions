@@ -81,7 +81,7 @@ export const RiskDisclosure: React.FC<RiskDisclosureProps> = ({ onNavigate }) =>
               03. The Severe Dangers of Martingale & Progression Staking
             </h4>
             <p className="text-[11px] text-slate-400 leading-relaxed">
-              Doubling stakes after losses ("Martingale") creates the illusion of consistent small wins while concealing an exponential probability of catastrophic account wipeout. A streak of 6 consecutive losses on a $10 base stake requires risking $640 on the 7th trade just to recover $9.50. Stratum Pro strictly enforces hard stop-loss limits in all automation scripts.
+              Doubling stakes after losses ("Martingale") creates the illusion of consistent small wins while concealing an exponential probability of catastrophic account wipeout. A streak of 6 consecutive losses on a $10 base stake requires risking $640 on the 7th trade just to recover $9.50. DevOptions strictly enforces hard stop-loss limits in all automation scripts.
             </p>
           </div>
         </div>

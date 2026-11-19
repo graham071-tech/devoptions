@@ -4,6 +4,7 @@ import {
   AuthUser,
   AdminMetrics,
   AdminUserRecord,
+  AdminRiskState,
 } from '../../services/authClient';
 import { useToast } from '../common/ToastNotification';
 import {
@@ -60,6 +61,8 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
   const [adjustingUserId, setAdjustingUserId] = useState<string | null>(null);
   const [adjustAmount, setAdjustAmount] = useState<string>('1000');
   const [adjustType, setAdjustType] = useState<'demo' | 'real'>('demo');
+  const [riskState, setRiskState] = useState<AdminRiskState | null>(null);
+  const [resettingPeriod, setResettingPeriod] = useState<boolean>(false);
 
   const isAdmin = currentUser?.role === 'admin';
 
@@ -67,16 +70,31 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
     if (!isAdmin) return;
     setLoading(true);
     try {
-      const [overviewData, userList] = await Promise.all([
+      const [overviewData, userList, fetchedRisk] = await Promise.all([
         authClient.getAdminOverview(),
         authClient.getAdminUsers(),
+        authClient.getRiskProtection().catch(() => null),
       ]);
       setMetrics(overviewData.metrics);
       setUsers(userList);
+      setRiskState(fetchedRisk);
     } catch (err: any) {
       showToast('error', 'Admin Access Error', err.message || 'Failed to load administrator data');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleResetRiskPeriod = async () => {
+    setResettingPeriod(true);
+    try {
+      const updated = await authClient.resetRiskControlPeriod();
+      setRiskState(updated);
+      showToast('success', 'Risk Period Reset', 'Protected administrator loss counters have been reset.');
+    } catch (err: any) {
+      showToast('error', 'Reset Blocked', err.message || 'Could not reset risk-control period.');
+    } finally {
+      setResettingPeriod(false);
     }
   };
 
@@ -540,6 +558,59 @@ export const AdminPortalModal: React.FC<AdminPortalModalProps> = ({
                   </span>
                 </div>
               </div>
+
+              {/* Protected Admin Risk-Control Period */}
+              {riskState?.enabled && (
+                <div className="p-4 rounded-xl bg-slate-900/50 border border-cyan-500/30 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                      <h3 className="text-xs font-bold text-slate-100 uppercase font-mono">
+                        Exclusive Admin Loss Protection ({riskState.activeMode.toUpperCase()} / All Modes)
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={resettingPeriod}
+                      onClick={handleResetRiskPeriod}
+                      className="px-3 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-slate-950 font-bold text-[10px] uppercase cursor-pointer"
+                    >
+                      {resettingPeriod ? 'Resetting...' : 'Reset Risk Period'}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono">
+                    <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block">Consecutive Losses</span>
+                      <span className="font-bold text-slate-100">
+                        {riskState.consecutiveLosses} / {riskState.maxConsecutiveLosses}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block">Period Total Losses</span>
+                      <span className="font-bold text-slate-100">
+                        {riskState.totalLosses} / {riskState.maxTotalLosses}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block">Cumulative / Max Loss</span>
+                      <span className="font-bold text-slate-100">
+                        ${riskState.cumulativeLoss.toFixed(2)} / ${riskState.configuredMaxLoss.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-500 block">Remaining Allowance</span>
+                      <span className="font-bold text-emerald-400">
+                        ${riskState.remainingLossAllowance.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                  {riskState.halted && riskState.haltReason && (
+                    <div className="p-2.5 rounded-lg bg-rose-950/30 border border-rose-500/40 text-rose-200 text-[11px] font-mono">
+                      {riskState.haltReason}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Active Admin Accounts (loaded from backend for authenticated admins only) */}
               <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800 space-y-2">

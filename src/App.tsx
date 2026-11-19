@@ -101,7 +101,7 @@ function TradingAppContent() {
         }).catch((error) => {
           const msg = error instanceof Error ? error.message : '';
           if (/already.*settled/i.test(msg)) return;
-          console.error('Could not settle simulated trade on server:', error);
+          console.error('Could not settle trade on server:', error);
           showToast('error', 'Settlement Needs Attention', 'The server could not confirm this trade settlement. Please refresh and check your account balance.');
         });
       } else if (trade.mode === 'demo' && trade.status === 'won') {
@@ -122,15 +122,15 @@ function TradingAppContent() {
         audioEffects.playWin();
         showToast(
           'success',
-          'Contract Won',
-          `Trade settled in profit (+$${newlyCompleted[0].profitLoss.toFixed(2)} USD)`
+          'Trade Successful',
+          `Position closed in profit (+$${newlyCompleted[0].profitLoss.toFixed(2)} USD)`
         );
       } else if (hasLoss && !hasWin) {
         audioEffects.playLoss();
         showToast(
           'error',
-          'Contract Lost',
-          `Trade settled at loss (-$${Math.abs(newlyCompleted[0].profitLoss).toFixed(2)} USD)`
+          'Trade Lost',
+          `Position closed at loss (-$${Math.abs(newlyCompleted[0].profitLoss).toFixed(2)} USD)`
         );
       } else {
         audioEffects.playAlert();

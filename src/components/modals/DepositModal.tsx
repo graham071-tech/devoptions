@@ -493,7 +493,7 @@ export const DepositModal: React.FC<DepositModalProps> = ({
                     </div>
                   </div>
                   <div className="space-y-0.5 border-l border-slate-800/80 pl-2.5">
-                    <span className="text-[10px] uppercase font-mono text-slate-400">Practice Demo Balance</span>
+                    <span className="text-[10px] uppercase font-mono text-slate-400">Demo Available Balance</span>
                     <div className="flex items-baseline gap-1">
                       <span className="font-mono text-base font-bold text-amber-300 tabular-nums">
                         ${(authUser?.demoBalance ?? profile.demoBalance ?? 10000).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
