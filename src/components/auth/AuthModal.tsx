@@ -65,8 +65,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
   useEffect(() => {
     setMode(initialMode);
+    setLoading(false);
     setErrorMessage('');
     setSuccessMessage('');
+    if (!isOpen || initialMode === 'register') {
+      setFullName('');
+      setEmail('');
+      setPhone('');
+      setPassword('');
+      setConfirmPassword('');
+    }
   }, [initialMode, isOpen]);
 
   useEffect(() => {
@@ -145,13 +153,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         password,
         confirmPassword,
       });
-      setLoading(false);
       showToast('success', 'Account Registered', 'Welcome to DevOptions! Account created successfully.');
       setMode('verify');
       if (onAuthSuccess) onAuthSuccess(res.user);
     } catch (err: any) {
-      setLoading(false);
       setErrorMessage(err.message || 'Registration failed');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -161,7 +169,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setErrorMessage('');
     setSuccessMessage('');
 
-    if (!email || !password) {
+    const trimmedIdentifier = email.trim();
+    if (!trimmedIdentifier || !password) {
       setErrorMessage('Please enter your email or phone and password.');
       return;
     }
@@ -169,16 +178,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     try {
       const res = await authClient.login({
-        identifier: email,
+        identifier: trimmedIdentifier,
         password,
       });
-      setLoading(false);
       showToast('success', 'Logged In', 'Welcome back to DevOptions Terminal.');
       if (onAuthSuccess) onAuthSuccess(res.user);
       onClose();
     } catch (err: any) {
-      setLoading(false);
       setErrorMessage(err.message || 'Login failed');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -249,15 +258,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     try {
       const res = await authClient.forgotPassword(forgotIdentifier);
-      setLoading(false);
+      if (res.deliveryConfigured === false && !res.devOtp) {
+        setErrorMessage(
+          'Email/SMS delivery is not configured on this server. Please contact an administrator or sign in with your existing password.'
+        );
+        return;
+      }
       setSuccessMessage(res.message);
       setMode('reset');
       if (res.devOtp) {
         setResetCode(res.devOtp);
       }
     } catch (err: any) {
-      setLoading(false);
       setErrorMessage(err.message || 'Request failed');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -290,14 +305,19 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         newPassword,
         confirmNewPassword
       );
-      setLoading(false);
       showToast('success', 'Password Reset', res.message);
+      setEmail(forgotIdentifier.trim());
       setMode('login');
       setPassword('');
       setConfirmPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setResetCode('');
+      setSuccessMessage('Password updated. Sign in with your new password.');
     } catch (err: any) {
-      setLoading(false);
       setErrorMessage(err.message || 'Password reset failed');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -357,7 +377,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               VIEW 1: REGISTER
           ───────────────────────────────────────────────────────────── */}
           {mode === 'register' && (
-            <form onSubmit={handleRegister} className="space-y-3.5">
+            <form onSubmit={handleRegister} autoComplete="off" className="space-y-3.5">
               {/* Full Name */}
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold text-slate-400 uppercase font-mono flex items-center justify-between">
@@ -368,6 +388,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type="text"
+                    name="register_full_name"
+                    autoComplete="off"
                     required
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
@@ -387,6 +409,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type="email"
+                    name="register_email"
+                    autoComplete="off"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -406,6 +430,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type="tel"
+                    name="register_phone"
+                    autoComplete="off"
                     required
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
@@ -425,6 +451,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type={showPassword ? 'text' : 'password'}
+                    name="register_new_password"
+                    autoComplete="new-password"
                     required
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -450,6 +478,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type={showConfirmPassword ? 'text' : 'password'}
+                    name="register_confirm_password"
+                    autoComplete="new-password"
                     required
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
@@ -533,6 +563,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type="text"
+                    name="username"
+                    autoComplete="username"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -563,6 +595,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
                   <input
                     type={showPassword ? 'text' : 'password'}
+                    name="password"
+                    autoComplete="current-password"
                     required
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -596,6 +630,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   onClick={() => {
                     setMode('register');
                     setErrorMessage('');
+                    setSuccessMessage('');
+                    setFullName('');
+                    setEmail('');
+                    setPhone('');
+                    setPassword('');
+                    setConfirmPassword('');
                   }}
                   className="text-cyan-400 hover:underline font-semibold cursor-pointer"
                 >

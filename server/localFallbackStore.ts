@@ -23,6 +23,7 @@ export interface LocalUserRow {
   country?: string | null;
   theme?: string | null;
   sound_enabled?: boolean | null;
+  token_valid_after?: number | null;
 }
 
 export interface LocalSessionRow {
@@ -30,6 +31,11 @@ export interface LocalSessionRow {
   user_id: string;
   created_at: number;
   expires_at: number;
+}
+
+export interface LocalRevokedTokenRow {
+  sid: string;
+  exp: number;
 }
 
 export interface LocalTradeRow {
@@ -64,6 +70,7 @@ interface LocalDatabase {
   sessions: LocalSessionRow[];
   trades: LocalTradeRow[];
   deposits: LocalDepositRow[];
+  revoked_tokens: LocalRevokedTokenRow[];
 }
 
 function resolveDbPath(): string {
@@ -119,7 +126,8 @@ const SEEDED_ADMINS: LocalUserRow[] = [
 ];
 
 function loadDb(): LocalDatabase {
-  let db: LocalDatabase = { users: [], sessions: [], trades: [], deposits: [] };
+  const now = Date.now();
+  let db: LocalDatabase = { users: [], sessions: [], trades: [], deposits: [], revoked_tokens: [] };
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
@@ -129,6 +137,7 @@ function loadDb(): LocalDatabase {
         sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
         trades: Array.isArray(parsed.trades) ? parsed.trades : [],
         deposits: Array.isArray(parsed.deposits) ? parsed.deposits : [],
+        revoked_tokens: Array.isArray(parsed.revoked_tokens) ? parsed.revoked_tokens : [],
       };
     }
   } catch (err) {
@@ -136,8 +145,21 @@ function loadDb(): LocalDatabase {
   }
 
   let modified = false;
+
+  // Prune expired sessions and expired revocations so db.json stays lean
+  const activeSessions = db.sessions.filter((s) => Number(s.expires_at) > now);
+  if (activeSessions.length !== db.sessions.length) {
+    db.sessions = activeSessions;
+    modified = true;
+  }
+  const activeRevocations = db.revoked_tokens.filter((r) => Number(r.exp) > now);
+  if (activeRevocations.length !== db.revoked_tokens.length) {
+    db.revoked_tokens = activeRevocations;
+    modified = true;
+  }
+
   for (const adm of SEEDED_ADMINS) {
-    const existing = db.users.find((u) => u.email === adm.email);
+    const existing = db.users.find((u) => u.email.toLowerCase() === adm.email.toLowerCase());
     if (!existing) {
       db.users.push({ ...adm });
       modified = true;
@@ -174,7 +196,8 @@ function getDb(): LocalDatabase {
 export const localFallbackStore = {
   // Users
   findUserByEmail(email: string): LocalUserRow | null {
-    return getDb().users.find((u) => u.email === email) || null;
+    const target = email.trim().toLowerCase();
+    return getDb().users.find((u) => u.email.toLowerCase() === target) || null;
   },
 
   findUserByPhone(phone: string): LocalUserRow | null {
@@ -187,7 +210,8 @@ export const localFallbackStore = {
 
   insertUser(row: LocalUserRow): { error?: { code?: string; message: string } } {
     const db = getDb();
-    if (db.users.some((u) => u.email === row.email || u.phone === row.phone)) {
+    const targetEmail = row.email.trim().toLowerCase();
+    if (db.users.some((u) => u.email.toLowerCase() === targetEmail || u.phone === row.phone)) {
       return {
         error: {
           code: '23505',
@@ -195,7 +219,7 @@ export const localFallbackStore = {
         },
       };
     }
-    db.users.push({ ...row });
+    db.users.push({ ...row, email: targetEmail });
     saveDb(db);
     return {};
   },
@@ -227,6 +251,8 @@ export const localFallbackStore = {
 
   insertSession(row: LocalSessionRow): void {
     const db = getDb();
+    const now = Date.now();
+    db.sessions = db.sessions.filter((s) => Number(s.expires_at) > now);
     db.sessions.push({ ...row });
     saveDb(db);
   },
@@ -241,6 +267,23 @@ export const localFallbackStore = {
     const db = getDb();
     db.sessions = db.sessions.filter((s) => s.user_id !== userId);
     saveDb(db);
+  },
+
+  revokeSessionId(sid: string, exp: number): void {
+    if (!sid) return;
+    const db = getDb();
+    const now = Date.now();
+    db.revoked_tokens = db.revoked_tokens.filter((r) => Number(r.exp) > now && r.sid !== sid);
+    if (exp > now) {
+      db.revoked_tokens.push({ sid, exp });
+    }
+    saveDb(db);
+  },
+
+  isSessionIdRevoked(sid: string): boolean {
+    if (!sid) return false;
+    const now = Date.now();
+    return getDb().revoked_tokens.some((r) => r.sid === sid && Number(r.exp) > now);
   },
 
   countActiveSessions(now: number): number {

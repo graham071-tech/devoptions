@@ -16,6 +16,7 @@ dotenv.config();
 marketEngine.startLoop();
 
 const app = express();
+app.set('trust proxy', 1);
 export { app };
 
 async function withStoreFallback<T>(
@@ -62,7 +63,8 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   if (origin) {
     const isAllowed =
       allowedOrigins.has(origin.replace(/\/+$/, '')) ||
-      /^https:\/\/[a-zA-Z0-9_-]+\.vercel\.app$/.test(origin);
+      /^https:\/\/[a-zA-Z0-9_-]+\.vercel\.app$/.test(origin) ||
+      /^https:\/\/[a-zA-Z0-9._-]+\.run\.app$/.test(origin);
     if (isAllowed) {
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
@@ -97,28 +99,33 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
   return cookies;
 }
 
-function setSessionCookie(res: Response, token: string) {
-  const isProd = process.env.NODE_ENV === 'production';
+function isHttpsRequest(req: Request): boolean {
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return req.secure || proto === 'https' || process.env.NODE_ENV === 'production';
+}
+
+function setSessionCookie(req: Request, res: Response, token: string) {
+  const https = isHttpsRequest(req);
   const cookieParts = [
     `devoptions_session=${encodeURIComponent(token)}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    https ? 'SameSite=None' : 'SameSite=Lax',
     `Max-Age=${7 * 24 * 60 * 60}`,
-    isProd ? 'Secure' : '',
+    https ? 'Secure' : '',
   ].filter(Boolean);
   res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
 
-function clearSessionCookie(res: Response) {
-  const isProd = process.env.NODE_ENV === 'production';
+function clearSessionCookie(req: Request, res: Response) {
+  const https = isHttpsRequest(req);
   const cookieParts = [
     'devoptions_session=',
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    https ? 'SameSite=None' : 'SameSite=Lax',
     'Max-Age=0',
-    isProd ? 'Secure' : '',
+    https ? 'Secure' : '',
   ].filter(Boolean);
   res.setHeader('Set-Cookie', cookieParts.join('; '));
 }
@@ -197,8 +204,83 @@ function generateSecureOtp(): string {
   return num.toString();
 }
 
-function generateToken(): string {
-  return crypto.randomBytes(32).toString('hex');
+function getSessionSigningSecret(): string {
+  return (
+    process.env.AUTH_SESSION_SECRET ||
+    process.env.JWT_SECRET ||
+    process.env.SUPABASE_SECRET_KEY ||
+    'devoptions-hmac-session-key-v1'
+  );
+}
+
+function computePasswordVersion(passwordHash: string, salt: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`${passwordHash}:${salt}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+interface SignedTokenPayload {
+  v: 1;
+  sid: string;
+  uid: string;
+  iat: number;
+  exp: number;
+  pv: string;
+}
+
+function issueSignedSessionToken(
+  user: { id: string; passwordHash: string; salt: string },
+  now: number,
+  expiresAt: number
+): string {
+  const payload: SignedTokenPayload = {
+    v: 1,
+    sid: crypto.randomBytes(16).toString('hex'),
+    uid: user.id,
+    iat: now,
+    exp: expiresAt,
+    pv: computePasswordVersion(user.passwordHash, user.salt),
+  };
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const sigB64 = crypto
+    .createHmac('sha256', getSessionSigningSecret())
+    .update(payloadB64)
+    .digest('base64url');
+  return `v1.${payloadB64}.${sigB64}`;
+}
+
+function verifySignedSessionToken(token: string): SignedTokenPayload | null {
+  if (!token || !token.startsWith('v1.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, payloadB64, sigB64] = parts;
+  if (!payloadB64 || !sigB64) return null;
+  try {
+    const expectedSig = crypto
+      .createHmac('sha256', getSessionSigningSecret())
+      .update(payloadB64)
+      .digest('base64url');
+    const a = Buffer.from(sigB64, 'utf8');
+    const b = Buffer.from(expectedSig, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const decoded = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    if (
+      !decoded ||
+      decoded.v !== 1 ||
+      typeof decoded.sid !== 'string' ||
+      typeof decoded.uid !== 'string' ||
+      typeof decoded.iat !== 'number' ||
+      typeof decoded.exp !== 'number' ||
+      typeof decoded.pv !== 'string'
+    ) {
+      return null;
+    }
+    return decoded as SignedTokenPayload;
+  } catch {
+    return null;
+  }
 }
 
 function normalizeEmail(email: string): string {
@@ -209,6 +291,9 @@ function normalizePhone(phone: string): string {
   let cleaned = phone.trim().replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '+');
   if (/^\+0[17]\d{8}$/.test(cleaned)) {
     cleaned = cleaned.slice(1);
+  }
+  if (/^\+2540([17]\d{8})$/.test(cleaned)) {
+    cleaned = cleaned.replace(/^\+2540([17]\d{8})$/, '+254$1');
   }
   // If user entered Kenyan 07XX or 01XX (10 digits starting with 0)
   if (/^0[17]\d{8}$/.test(cleaned)) {
@@ -259,11 +344,27 @@ interface RateLimitBucket {
 }
 const rateLimits = new Map<string, RateLimitBucket>();
 
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function pruneExpiredRateLimits(now: number) {
+  if (rateLimits.size < 500) return;
+  for (const [k, v] of rateLimits.entries()) {
+    if (v.resetAt < now) rateLimits.delete(k);
+  }
+}
+
 function rateLimitMiddleware(limit = 15, windowMs = 60 * 1000) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const ip = getClientIp(req);
     const key = `${ip}:${req.path}`;
     const now = Date.now();
+    pruneExpiredRateLimits(now);
 
     const bucket = rateLimits.get(key);
     if (!bucket || bucket.resetAt < now) {
@@ -282,12 +383,48 @@ function rateLimitMiddleware(limit = 15, windowMs = 60 * 1000) {
   };
 }
 
+function loginFailureRateLimitMiddleware(maxFailures = 20, windowMs = 60 * 1000) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const ip = getClientIp(req);
+    const rawId = String(req.body?.identifier || req.body?.email || req.body?.phone || '')
+      .trim()
+      .toLowerCase();
+    const key = `login:${ip}:${rawId || 'anon'}`;
+    const now = Date.now();
+    pruneExpiredRateLimits(now);
+
+    const bucket = rateLimits.get(key);
+    if (bucket && bucket.resetAt >= now && bucket.count >= maxFailures) {
+      return res.status(429).json({
+        error: 'Too many failed login attempts. Please wait a minute and try again.',
+      });
+    }
+
+    res.on('finish', () => {
+      const doneAt = Date.now();
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        rateLimits.delete(key);
+      } else if (res.statusCode === 401) {
+        const cur = rateLimits.get(key);
+        if (!cur || cur.resetAt < doneAt) {
+          rateLimits.set(key, { count: 1, resetAt: doneAt + windowMs });
+        } else {
+          cur.count += 1;
+        }
+      }
+    });
+
+    next();
+  };
+}
+
 // ─────────────────────────────────────────────────────────────
 // AUTHENTICATION MIDDLEWARE
 // ─────────────────────────────────────────────────────────────
 interface AuthenticatedRequest extends Request {
   user?: UserRecord;
   sessionToken?: string;
+  sessionExpiresAt?: number;
 }
 
 async function requireAuth(
@@ -364,7 +501,7 @@ async function requireAuth(
 
         const { data: row, error: userError } = await supabase
           .from('users')
-          .select('id,email,phone,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
+          .select('id,email,phone,password_hash,salt,role,created_at,email_verified,phone_verified,email_verification_code,email_verification_expires,phone_verification_code,phone_verification_expires,demo_balance,real_balance,full_name,country,theme,sound_enabled')
           .eq('id', session.user_id)
           .maybeSingle();
 
@@ -384,11 +521,40 @@ async function requireAuth(
           };
         }
 
-        return { status: 200 as const, user: userFromRow(row) };
+        return { status: 200 as const, user: userFromRow(row), expiresAt: Number(session.expires_at) };
       },
       () => {
+        const now = Date.now();
         const session = localFallbackStore.findSession(token!);
-        if (!session) {
+        if (session) {
+          if (Number(session.expires_at) < now) {
+            localFallbackStore.deleteSession(token!);
+            return {
+              status: 401 as const,
+              body: {
+                error: 'Session expired',
+                message: 'Your session has expired. Please log in again.',
+                code: 'SESSION_EXPIRED',
+              },
+            };
+          }
+          const row = localFallbackStore.findUserById(session.user_id);
+          if (!row) {
+            return {
+              status: 401 as const,
+              body: {
+                error: 'Account inactive',
+                message: 'Contact support for assistance.',
+                code: 'ACCOUNT_INACTIVE',
+              },
+            };
+          }
+          return { status: 200 as const, user: userFromRow(row), expiresAt: Number(session.expires_at) };
+        }
+
+        // Stateless signed-token verification fallback when local session store resets across container restarts
+        const signed = verifySignedSessionToken(token!);
+        if (!signed) {
           return {
             status: 401 as const,
             body: {
@@ -398,8 +564,7 @@ async function requireAuth(
             },
           };
         }
-        if (Number(session.expires_at) < Date.now()) {
-          localFallbackStore.deleteSession(token!);
+        if (signed.exp < now) {
           return {
             status: 401 as const,
             body: {
@@ -409,7 +574,17 @@ async function requireAuth(
             },
           };
         }
-        const row = localFallbackStore.findUserById(session.user_id);
+        if (localFallbackStore.isSessionIdRevoked(signed.sid)) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Session expired',
+              message: 'Your session has ended. Please log in again.',
+              code: 'SESSION_EXPIRED',
+            },
+          };
+        }
+        const row = localFallbackStore.findUserById(signed.uid);
         if (!row) {
           return {
             status: 401 as const,
@@ -420,7 +595,34 @@ async function requireAuth(
             },
           };
         }
-        return { status: 200 as const, user: userFromRow(row) };
+        if (row.token_valid_after && signed.iat < Number(row.token_valid_after)) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Session expired',
+              message: 'Credentials changed. Please log in again.',
+              code: 'SESSION_EXPIRED',
+            },
+          };
+        }
+        if (signed.pv !== computePasswordVersion(row.password_hash, row.salt)) {
+          return {
+            status: 401 as const,
+            body: {
+              error: 'Session expired',
+              message: 'Credentials changed. Please log in again.',
+              code: 'SESSION_EXPIRED',
+            },
+          };
+        }
+        // Re-hydrate local session list for metrics & consistency
+        localFallbackStore.insertSession({
+          token: token!,
+          user_id: row.id,
+          created_at: signed.iat,
+          expires_at: signed.exp,
+        });
+        return { status: 200 as const, user: userFromRow(row), expiresAt: signed.exp };
       }
     );
 
@@ -430,6 +632,7 @@ async function requireAuth(
 
     req.user = authResult.user;
     req.sessionToken = token;
+    req.sessionExpiresAt = authResult.expiresAt;
 
     return next();
   } catch (err) {
@@ -590,10 +793,12 @@ app.post(
       const phoneOtp = generateSecureOtp();
       const now = Date.now();
       const otpExpiry = now + 15 * 60 * 1000;
-      const sessionToken = generateToken();
+      const userId = `usr_${crypto.randomUUID()}`;
+      const sessionExpiry = now + 7 * 24 * 60 * 60 * 1000;
+      const sessionToken = issueSignedSessionToken({ id: userId, passwordHash, salt }, now, sessionExpiry);
 
       const newUser: UserRecord = {
-        id: `usr_${crypto.randomUUID()}`,
+        id: userId,
         email: normEmail,
         phone: normPhone,
         passwordHash,
@@ -777,7 +982,7 @@ app.post(
         return res.status(regResult.status).json(regResult.body);
       }
 
-      setSessionCookie(res, sessionToken);
+      setSessionCookie(req, res, sessionToken);
 
       const isDevelopment = process.env.NODE_ENV !== 'production';
       await dispatchVerificationCodes(newUser, emailOtp, phoneOtp);
@@ -796,6 +1001,7 @@ app.post(
         success: true,
         message: 'Account registered successfully. Please verify your contact details.',
         token: sessionToken,
+        expiresAt: sessionExpiry,
         user: safeUser,
         balances: { demo: newUser.demoBalance, real: newUser.realBalance },
       });
@@ -861,7 +1067,7 @@ function publicAdminUser(user: UserRecord) {
 }
 
 // 2. LOGIN
-app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request, res: Response) => {
+app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (req: Request, res: Response) => {
   try {
     const rawId = req.body?.identifier || req.body?.email || req.body?.phone;
     const password = req.body?.password;
@@ -874,34 +1080,56 @@ app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request,
     const identifier = rawId.trim();
     const isEmail = identifier.includes('@');
     const normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
-    const now = Date.now(), token = generateToken();
+    const rawPlusPhone = !isEmail
+      ? '+' + identifier.replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '')
+      : '';
+    const now = Date.now();
+    const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
 
     const loginResult = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        const { data: row, error } = await supabase.from('users').select('*')
+        let { data: row, error } = await supabase.from('users').select('*')
           .eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        if (!error && !row && !isEmail && rawPlusPhone && rawPlusPhone !== normalized) {
+          const fallbackQuery = await supabase.from('users').select('*').eq('phone', rawPlusPhone).maybeSingle();
+          row = fallbackQuery.data;
+          error = fallbackQuery.error;
+        }
         if (error) throw error;
         if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
           return { status: 401 as const };
         }
+        const token = issueSignedSessionToken(
+          { id: row.id, passwordHash: row.password_hash, salt: row.salt },
+          now,
+          expiresAt
+        );
         const { error: sessionError } = await supabase.from('sessions').insert({
-          token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
+          token, user_id: row.id, created_at: now, expires_at: expiresAt,
         });
         if (sessionError) throw sessionError;
-        return { status: 200 as const, row };
+        return { status: 200 as const, row, token };
       },
       () => {
-        const row = isEmail
+        let row = isEmail
           ? localFallbackStore.findUserByEmail(normalized)
           : localFallbackStore.findUserByPhone(normalized);
+        if (!row && !isEmail && rawPlusPhone && rawPlusPhone !== normalized) {
+          row = localFallbackStore.findUserByPhone(rawPlusPhone);
+        }
         if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
           return { status: 401 as const };
         }
+        const token = issueSignedSessionToken(
+          { id: row.id, passwordHash: row.password_hash, salt: row.salt },
+          now,
+          expiresAt
+        );
         localFallbackStore.insertSession({
-          token, user_id: row.id, created_at: now, expires_at: now + 7 * 24 * 60 * 60 * 1000,
+          token, user_id: row.id, created_at: now, expires_at: expiresAt,
         });
-        return { status: 200 as const, row };
+        return { status: 200 as const, row, token };
       }
     );
 
@@ -911,13 +1139,14 @@ app.post('/api/auth/login', rateLimitMiddleware(15, 60000), async (req: Request,
         message: 'Invalid email, phone, or password.',
       });
     }
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, loginResult.token);
     const user = userFromRow(loginResult.row);
     const safeUser = safeUserResponse(user);
     return res.json({
       success: true,
       message: 'Logged in successfully.',
-      token,
+      token: loginResult.token,
+      expiresAt,
       user: safeUser,
       balances: { demo: safeUser.demoBalance, real: safeUser.realBalance },
     });
@@ -939,10 +1168,16 @@ app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res:
         if (error) throw error;
       },
       () => {
-        if (req.sessionToken) localFallbackStore.deleteSession(req.sessionToken);
+        if (req.sessionToken) {
+          localFallbackStore.deleteSession(req.sessionToken);
+          const signed = verifySignedSessionToken(req.sessionToken);
+          if (signed) {
+            localFallbackStore.revokeSessionId(signed.sid, signed.exp);
+          }
+        }
       }
     );
-    clearSessionCookie(res);
+    clearSessionCookie(req, res);
     return res.json({ message: 'Logged out successfully.' });
   } catch (error) {
     console.error('[Logout Error]:', error);
@@ -950,10 +1185,97 @@ app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res:
   }
 });
 
-// 4. CURRENT USER
-app.get('/api/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) =>
-  res.json({ user: safeUserResponse(req.user!) })
-);
+// 4. CURRENT USER (with sliding refresh when past half-life)
+async function rotateSessionToken(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<{ token: string; expiresAt: number }> {
+  const user = req.user!;
+  const now = Date.now();
+  const nextExpiresAt = now + 7 * 24 * 60 * 60 * 1000;
+  const newToken = issueSignedSessionToken(
+    { id: user.id, passwordHash: user.passwordHash, salt: user.salt },
+    now,
+    nextExpiresAt
+  );
+  const oldToken = req.sessionToken;
+
+  await withStoreFallback(
+    async () => {
+      const supabase = getSupabaseClient();
+      const { error } = await supabase.from('sessions').insert({
+        token: newToken,
+        user_id: user.id,
+        created_at: now,
+        expires_at: nextExpiresAt,
+      });
+      if (error) throw error;
+      if (oldToken && oldToken !== newToken) {
+        await supabase.from('sessions').delete().eq('token', oldToken);
+      }
+    },
+    () => {
+      localFallbackStore.insertSession({
+        token: newToken,
+        user_id: user.id,
+        created_at: now,
+        expires_at: nextExpiresAt,
+      });
+      if (oldToken && oldToken !== newToken) {
+        localFallbackStore.deleteSession(oldToken);
+      }
+    }
+  );
+
+  setSessionCookie(req, res, newToken);
+  return { token: newToken, expiresAt: nextExpiresAt };
+}
+
+app.get('/api/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const now = Date.now();
+    const halfLifeMs = 3.5 * 24 * 60 * 60 * 1000;
+    const currentExp = req.sessionExpiresAt || now + 7 * 24 * 60 * 60 * 1000;
+    if (currentExp - now < halfLifeMs) {
+      const rotated = await rotateSessionToken(req, res);
+      return res.json({
+        user: safeUserResponse(req.user!),
+        token: rotated.token,
+        expiresAt: rotated.expiresAt,
+        refreshed: true,
+      });
+    }
+    return res.json({
+      user: safeUserResponse(req.user!),
+      expiresAt: currentExp,
+      refreshed: false,
+    });
+  } catch (error) {
+    console.error('[Auth Me Error]:', error);
+    return res.json({
+      user: safeUserResponse(req.user!),
+      expiresAt: req.sessionExpiresAt,
+      refreshed: false,
+    });
+  }
+});
+
+// 4.5 REFRESH SESSION TOKEN
+app.post('/api/auth/refresh', requireAuth, rateLimitMiddleware(60, 60000), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rotated = await rotateSessionToken(req, res);
+    return res.json({
+      success: true,
+      message: 'Session refreshed.',
+      token: rotated.token,
+      expiresAt: rotated.expiresAt,
+      user: safeUserResponse(req.user!),
+    });
+  } catch (error) {
+    console.error('[Token Refresh Error]:', error);
+    return res.status(500).json({ error: 'Could not refresh session.' });
+  }
+});
 
 // 5-6. VERIFY EMAIL / PHONE
 async function verifyContact(req: AuthenticatedRequest, res: Response, type: 'email' | 'phone') {
@@ -1049,10 +1371,17 @@ app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req:
       }
     );
 
-    if (!resetUserRow) return res.json({ message: generic });
+    const deliveryConfigured = isEmail ? hasSmtpConfig() : hasTwilioConfig();
+    if (!resetUserRow) {
+      return res.json({ message: generic, deliveryConfigured });
+    }
     await dispatchPasswordReset(userFromRow(resetUserRow), isEmail, otp);
     // OTP is returned only in development; production codes are delivered out-of-band.
-    return res.json({ message: generic, ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}) });
+    return res.json({
+      message: generic,
+      deliveryConfigured,
+      ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}),
+    });
   } catch (error) {
     console.error('[Forgot Password Error]:', error);
     return res.status(500).json({ error: 'Password reset service is unavailable.' });
@@ -1070,13 +1399,14 @@ app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req:
     const isEmail = String(identifier).trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
     const salt = crypto.randomBytes(16).toString('hex');
     const passwordHash = hashPassword(newPassword, salt);
+    const now = Date.now();
 
     const ok = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
         const { data: row, error } = await supabase.from('users').select('*').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
         if (error) throw error;
-        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
+        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < now) {
           return false;
         }
         const { error: updateError } = await supabase.from('users').update({
@@ -1091,11 +1421,15 @@ app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req:
         const row = isEmail
           ? localFallbackStore.findUserByEmail(normalized)
           : localFallbackStore.findUserByPhone(normalized);
-        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < Date.now()) {
+        if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < now) {
           return false;
         }
         localFallbackStore.updateUser(row.id, {
-          salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
+          salt,
+          password_hash: passwordHash,
+          reset_password_token: null,
+          reset_password_expires: null,
+          token_valid_after: now,
         });
         localFallbackStore.deleteSessionsByUser(row.id);
         return true;

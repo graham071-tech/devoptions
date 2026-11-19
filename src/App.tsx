@@ -34,7 +34,11 @@ function TradingAppContent() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
   const [authMode, setAuthMode] = useState<AuthMode>('login');
   const [hasExploredDemo, setHasExploredDemo] = useState<boolean>(() => {
-    return sessionStorage.getItem('devoptions_demo_explored') === 'true';
+    try {
+      return Boolean(authClient.getCurrentUser()) || sessionStorage.getItem('devoptions_demo_explored') === 'true';
+    } catch {
+      return Boolean(authClient.getCurrentUser());
+    }
   });
 
   // Mobile navigation drawer state
@@ -198,28 +202,51 @@ function TradingAppContent() {
     }
   };
 
+  const lastSyncedUserIdRef = useRef<string | null>(null);
+
   // Session verification and sync
   useEffect(() => {
     if (!authClient.isAuthenticated() && activeTradesRef.current.length > 0) {
       void reconcileActiveTrades(activeTradesRef.current);
     }
 
-    authClient.fetchMe().then((u) => {
-      if (u) {
-        setAuthUser(u);
-      }
-    });
-
-    const unsubAuth = authClient.subscribe((u) => {
+    const syncAuthenticatedUserData = (u: AuthUser | null) => {
       setAuthUser(u);
-      if (u) {
-        setProfile((prev) => ({
+      if (!u) {
+        lastSyncedUserIdRef.current = null;
+        return;
+      }
+
+      setHasExploredDemo(true);
+      try {
+        sessionStorage.setItem('devoptions_demo_explored', 'true');
+      } catch {
+        // Ignore storage restrictions inside iframes
+      }
+
+      setProfile((prev) => {
+        const nextName = u.fullName || u.email.split('@')[0];
+        const nextDemo = u.demoBalance ?? prev.demoBalance;
+        const nextReal = u.realBalance ?? prev.realBalance;
+        if (
+          prev.name === nextName &&
+          prev.email === u.email &&
+          prev.demoBalance === nextDemo &&
+          prev.realBalance === nextReal
+        ) {
+          return prev;
+        }
+        return {
           ...prev,
-          name: u.fullName || u.email.split('@')[0],
+          name: nextName,
           email: u.email,
-          demoBalance: u.demoBalance ?? prev.demoBalance,
-          realBalance: u.realBalance ?? prev.realBalance,
-        }));
+          demoBalance: nextDemo,
+          realBalance: nextReal,
+        };
+      });
+
+      if (lastSyncedUserIdRef.current !== u.id) {
+        lastSyncedUserIdRef.current = u.id;
         authClient.getTrades().then((serverTrades) => {
           const trades = serverTrades as Trade[];
           const openTrades = trades.filter((trade) => trade.status === 'active');
@@ -232,6 +259,12 @@ function TradingAppContent() {
         }).catch((error) => console.warn('Could not sync server trade history:', error));
         void authClient.getRiskProtection().catch((error) => console.warn('Could not sync risk protection state:', error));
       }
+    };
+
+    const unsubAuth = authClient.subscribe(syncAuthenticatedUserData);
+
+    authClient.fetchMe().then((u) => {
+      syncAuthenticatedUserData(u);
     });
 
     return () => unsubAuth();
@@ -450,7 +483,11 @@ function TradingAppContent() {
 
   const handleExploreDemo = () => {
     setHasExploredDemo(true);
-    sessionStorage.setItem('devoptions_demo_explored', 'true');
+    try {
+      sessionStorage.setItem('devoptions_demo_explored', 'true');
+    } catch {
+      // Ignore storage restrictions
+    }
     showToast('info', 'Demo Mode Active', 'Explore all features with $10,000.00 demo balance.');
   };
 
@@ -458,7 +495,11 @@ function TradingAppContent() {
     await authClient.logout();
     setAuthUser(null);
     setHasExploredDemo(false);
-    sessionStorage.removeItem('devoptions_demo_explored');
+    try {
+      sessionStorage.removeItem('devoptions_demo_explored');
+    } catch {
+      // Ignore storage restrictions
+    }
     audioEffects.playClick();
     showToast('info', 'Logged Out', 'You have been signed out of your account.');
   };
@@ -660,7 +701,11 @@ function TradingAppContent() {
         onAuthSuccess={(user) => {
           setAuthUser(user);
           setHasExploredDemo(true);
-          sessionStorage.setItem('devoptions_demo_explored', 'true');
+          try {
+            sessionStorage.setItem('devoptions_demo_explored', 'true');
+          } catch {
+            // Ignore storage restrictions
+          }
         }}
       />
 
