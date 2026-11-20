@@ -74,6 +74,9 @@ interface LocalDatabase {
 }
 
 function resolveDbPath(): string {
+  if (process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+    return path.join('/tmp', 'devoptions-db.json');
+  }
   const preferredDir = path.resolve(process.cwd(), 'data');
   try {
     if (!fs.existsSync(preferredDir)) {
@@ -88,7 +91,13 @@ function resolveDbPath(): string {
   }
 }
 
-const DB_FILE = resolveDbPath();
+let resolvedDbFile: string | null = null;
+function getDbFilePath(): string {
+  if (!resolvedDbFile) {
+    resolvedDbFile = resolveDbPath();
+  }
+  return resolvedDbFile;
+}
 
 export const LEGACY_PROTECTED_ADMIN_PASSWORD_HASH =
   'c92cc65720b3f407240df88c8e72adc04ebb614934a1a40d4b19a7b1d242cf8978bffb9a52204f67497d8777f2b4a12aebd140917c521880e6922ca74ff21f7c';
@@ -130,10 +139,11 @@ export const SEEDED_ADMINS: LocalUserRow[] = [
 
 function loadDb(): LocalDatabase {
   const now = Date.now();
+  const dbFile = getDbFilePath();
   let db: LocalDatabase = { users: [], sessions: [], trades: [], deposits: [], revoked_tokens: [] };
   try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+    if (fs.existsSync(dbFile)) {
+      const raw = fs.readFileSync(dbFile, 'utf-8');
       const parsed = JSON.parse(raw);
       db = {
         users: Array.isArray(parsed.users) ? parsed.users : [],
@@ -194,17 +204,21 @@ function loadDb(): LocalDatabase {
 
 function saveDb(db: LocalDatabase): void {
   try {
-    const tmp = `${DB_FILE}.tmp`;
+    const dbFile = getDbFilePath();
+    const tmp = `${dbFile}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(db, null, 2), 'utf-8');
-    fs.renameSync(tmp, DB_FILE);
+    fs.renameSync(tmp, dbFile);
   } catch (err) {
     console.error('[LocalFallbackStore] Failed to persist DB file:', err);
   }
 }
 
-let cachedDb: LocalDatabase = loadDb();
+let cachedDb: LocalDatabase | null = null;
 
 function getDb(): LocalDatabase {
+  if (!cachedDb) {
+    cachedDb = loadDb();
+  }
   return cachedDb;
 }
 

@@ -1,14 +1,14 @@
 import fs from 'fs';
 import path from 'path';
-import { SYNTHETIC_MARKETS } from '../src/data/syntheticMarkets';
-import { Candle, Market, Tick } from '../src/types/trading';
-import { extractLastDigit } from '../src/utils/indicators';
+import { SYNTHETIC_MARKETS } from '../src/data/syntheticMarkets.js';
+import type { Candle, Market, Tick } from '../src/types/trading.js';
+import { extractLastDigit } from '../src/utils/indicators.js';
 import {
   getSupabaseClient,
   isSupabaseTransportError,
   markSupabaseUnreachable,
   shouldUseLocalFallback,
-} from '../src/services/supabaseService';
+} from '../src/services/supabaseService.js';
 
 export type MarketRegime = 'bullish' | 'bearish' | 'sideways';
 
@@ -38,6 +38,9 @@ const TICK_MS = 1000;
 const CANDLE_MS = 60000;
 
 function resolveMarketStatePath(): string {
+  if (process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+    return path.join('/tmp', 'devoptions-market-state.json');
+  }
   const preferredDir = path.resolve(process.cwd(), 'data');
   try {
     if (!fs.existsSync(preferredDir)) {
@@ -346,8 +349,10 @@ class ServerMarketEngine {
       }
     }
 
-    this.saveSnapshotToDisk();
-    this.registerShutdownHook();
+    if (!(process.env.VERCEL && process.env.NODE_ENV !== 'test')) {
+      this.saveSnapshotToDisk();
+      this.registerShutdownHook();
+    }
   }
 
   private registerShutdownHook() {
@@ -476,6 +481,7 @@ class ServerMarketEngine {
   }
 
   public saveSnapshotToDisk() {
+    if (process.env.VERCEL && process.env.NODE_ENV !== 'test') return;
     try {
       const payload: MarketStateSnapshotFile = {
         version: 1,

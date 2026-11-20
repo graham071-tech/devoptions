@@ -3,10 +3,11 @@ import assert from 'node:assert';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import app from '../backend';
-import { localFallbackStore } from '../server/localFallbackStore';
-import { adminRiskStore, isProtectedAdminUser } from '../server/adminRiskStore';
-import { getSupabaseConfig, isJwtKey } from '../src/services/supabaseService';
+import { execFileSync } from 'node:child_process';
+import app from '../backend.js';
+import { localFallbackStore } from '../server/localFallbackStore.js';
+import { adminRiskStore, isProtectedAdminUser } from '../server/adminRiskStore.js';
+import { getSupabaseConfig, isJwtKey } from '../src/services/supabaseService.js';
 
 async function runTests() {
   console.log('--- Starting API Route & Auth Verification Tests ---');
@@ -982,6 +983,68 @@ async function runTests() {
       if (prevSupaKey !== undefined) process.env.SUPABASE_SECRET_KEY = prevSupaKey;
     }
     console.log('✓ Supabase key format detection, env alias support & serverless fail-loud 503 guard verified!');
+
+    // Test 15: Vercel Node ESM compilation + raw node handler invocation (regression guard for 500 FUNCTION_INVOCATION_FAILED)
+    console.log('\n[Test 15] Testing compiled Vercel serverless ESM entrypoint under plain Node...');
+    const tmpCompileDir = path.join('/tmp', `devoptions-vercel-esm-check-${Date.now()}`);
+    try {
+      const tscBin = path.resolve(process.cwd(), 'node_modules/.bin/tsc');
+      execFileSync(
+        tscBin,
+        [
+          'api/index.ts',
+          'api/[...path].ts',
+          '--ignoreConfig',
+          '--outDir',
+          tmpCompileDir,
+          '--module',
+          'nodenext',
+          '--moduleResolution',
+          'nodenext',
+          '--target',
+          'es2022',
+          '--esModuleInterop',
+          '--skipLibCheck',
+        ],
+        { stdio: 'pipe' }
+      );
+      fs.writeFileSync(path.join(tmpCompileDir, 'package.json'), JSON.stringify({ type: 'module' }));
+      const nodeModulesLink = path.join(tmpCompileDir, 'node_modules');
+      if (!fs.existsSync(nodeModulesLink)) {
+        fs.symlinkSync(path.resolve(process.cwd(), 'node_modules'), nodeModulesLink, 'dir');
+      }
+      const script = [
+        "import http from 'node:http';",
+        "import indexHandler from './api/index.js';",
+        "import catchAllHandler from './api/[...path].js';",
+        'const s1 = http.createServer(indexHandler);',
+        'await new Promise((r) => s1.listen(0, r));',
+        'const u1 = `http://127.0.0.1:${s1.address().port}/api/index?__path=health`;',
+        'const r1 = await fetch(u1);',
+        'const j1 = await r1.json();',
+        's1.close();',
+        'const s2 = http.createServer(catchAllHandler);',
+        'await new Promise((r) => s2.listen(0, r));',
+        'const u2 = `http://127.0.0.1:${s2.address().port}/api/health`;',
+        'const r2 = await fetch(u2);',
+        'const j2 = await r2.json();',
+        's2.close();',
+        'if (r1.status !== 200 || r2.status !== 200) throw new Error(`Bad status ${r1.status}/${r2.status}`);',
+        'if (j1.service !== "DevOptions Backend" || j2.service !== "DevOptions Backend") throw new Error("Missing service JSON");',
+        'console.log(JSON.stringify({ r1: r1.status, r2: r2.status, dbMode: j1.database?.mode }));',
+      ].join('\n');
+      const nodeOut = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+        cwd: tmpCompileDir,
+        env: { ...process.env, VERCEL: '1', NODE_ENV: 'production' },
+        stdio: 'pipe',
+      }).toString().trim();
+      const parsedOut = JSON.parse(nodeOut);
+      assert.strictEqual(parsedOut.r1, 200);
+      assert.strictEqual(parsedOut.r2, 200);
+      console.log('✓ Compiled Vercel ESM entrypoints booted and served /api/health under plain Node:', parsedOut);
+    } finally {
+      fs.rmSync(tmpCompileDir, { recursive: true, force: true });
+    }
 
     console.log('\n========================================');
     console.log('All API, Auth, Risk Protection & UI tests PASSED!');

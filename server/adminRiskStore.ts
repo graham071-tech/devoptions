@@ -5,7 +5,7 @@ import {
   isSupabaseTransportError,
   markSupabaseUnreachable,
   shouldUseLocalFallback,
-} from '../src/services/supabaseService';
+} from '../src/services/supabaseService.js';
 
 export const PROTECTED_ADMIN_EMAIL = 'francisgraham071@gmail.com';
 export const MAX_ADMIN_CONSECUTIVE_LOSSES = 3;
@@ -96,6 +96,9 @@ interface AdminRiskFile {
 }
 
 function resolveRiskFilePath(): string {
+  if (process.env.VERCEL && process.env.NODE_ENV !== 'test') {
+    return path.join('/tmp', 'devoptions-admin-risk.json');
+  }
   const preferredDir = path.resolve(process.cwd(), 'data');
   try {
     if (!fs.existsSync(preferredDir)) {
@@ -220,7 +223,9 @@ class AdminRiskStore {
   private userLocks: Map<string, Promise<void>> = new Map();
 
   constructor() {
-    this.loadFromDiskSync();
+    if (!(process.env.VERCEL && process.env.NODE_ENV !== 'test')) {
+      this.loadFromDiskSync();
+    }
   }
 
   private loadFromDiskSync() {
@@ -241,6 +246,7 @@ class AdminRiskStore {
   }
 
   private saveToDiskSync() {
+    if (process.env.VERCEL && process.env.NODE_ENV !== 'test') return;
     try {
       const payload: AdminRiskFile = {
         version: 2,

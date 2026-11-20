@@ -1,4 +1,4 @@
-import { Market } from '../types/trading';
+import type { Market } from '../types/trading.js';
 
 export const SYNTHETIC_MARKETS: Market[] = [
   {

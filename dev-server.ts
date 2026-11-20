@@ -1,5 +1,5 @@
 import { createServer } from 'vite';
-import app from './backend';
+import app from './backend.js';
 
 const port = Number(process.env.PORT || 3000);
 

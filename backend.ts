@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import { paynectaService } from './src/services/paynectaService';
+import { paynectaService } from './src/services/paynectaService.js';
 import {
   checkSupabaseConnectivity,
   getSupabaseClient,
@@ -9,17 +9,19 @@ import {
   isSupabaseTransportError,
   markSupabaseUnreachable,
   shouldUseLocalFallback,
-} from './src/services/supabaseService';
+} from './src/services/supabaseService.js';
 import {
   localFallbackStore,
   SEEDED_ADMINS,
   LEGACY_PROTECTED_ADMIN_PASSWORD_HASH,
-} from './server/localFallbackStore';
-import { marketEngine } from './server/marketEngine';
-import { adminRiskStore, isProtectedAdminUser, RiskSessionError } from './server/adminRiskStore';
+} from './server/localFallbackStore.js';
+import { marketEngine } from './server/marketEngine.js';
+import { adminRiskStore, isProtectedAdminUser, RiskSessionError } from './server/adminRiskStore.js';
 
-dotenv.config();
-marketEngine.startLoop();
+dotenv.config({ quiet: true });
+if (!isProductionServerless() && process.env.NODE_ENV !== 'test') {
+  marketEngine.startLoop();
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -700,6 +702,18 @@ async function requireAuth(
               },
             };
           }
+          if (row.token_valid_after && Number(session.created_at) < Number(row.token_valid_after)) {
+            localFallbackStore.deleteSession(token!);
+            return {
+              status: 401 as const,
+              clearCookie: true,
+              body: {
+                error: 'Session expired',
+                message: 'Credentials changed. Please log in again.',
+                code: 'SESSION_EXPIRED',
+              },
+            };
+          }
           return { status: 200 as const, user: userFromRow(row), expiresAt: Number(session.expires_at) };
         }
 
@@ -1058,10 +1072,11 @@ app.post(
                 };
               }
 
+              const phoneLookupCandidates = buildPhoneCandidates(normPhone);
               const { data: existingPhoneRows, error: phoneLookupErr } = await supabase
                 .from('users')
                 .select('id')
-                .eq('phone', normPhone)
+                .in('phone', phoneLookupCandidates.length > 0 ? phoneLookupCandidates : [normPhone])
                 .limit(1);
 
               if (phoneLookupErr) {
