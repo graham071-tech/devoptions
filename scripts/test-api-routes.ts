@@ -6,6 +6,7 @@ import path from 'node:path';
 import app from '../backend';
 import { localFallbackStore } from '../server/localFallbackStore';
 import { adminRiskStore, isProtectedAdminUser } from '../server/adminRiskStore';
+import { getSupabaseConfig, isJwtKey } from '../src/services/supabaseService';
 
 async function runTests() {
   console.log('--- Starting API Route & Auth Verification Tests ---');
@@ -483,13 +484,14 @@ async function runTests() {
     const ephemeralAdminEmail = `francisgraham_test_${adminSuffix}@example.com`;
     const ephemeralAdminPass = 'RiskTestPass2026!';
     const ephemeralSalt = crypto.randomBytes(16).toString('hex');
-    const ephemeralHash = `scrypt:${ephemeralSalt}:${crypto.scryptSync(ephemeralAdminPass, ephemeralSalt, 64).toString('hex')}`;
+    const ephemeralHash = crypto.scryptSync(ephemeralAdminPass, ephemeralSalt, 64).toString('hex');
 
     localFallbackStore.insertUser({
       id: ephemeralAdminId,
       email: ephemeralAdminEmail,
       phone: `+254799${adminSuffix}`,
       password_hash: ephemeralHash,
+      salt: ephemeralSalt,
       role: 'admin',
       email_verified: true,
       phone_verified: true,
@@ -812,6 +814,174 @@ async function runTests() {
       );
     }
     console.log('✓ Zero forbidden simulation wording found in active UI modules!');
+
+    // Test 13: Vercel rewrite (__path) forwarding, concurrent registration race protection, and auth security hygiene
+    console.log('\n[Test 13] Testing Vercel __path rewrites, concurrent registration race, case-insensitive login & secret hygiene...');
+    const vercelHealthRes = await fetch(`${baseUrl}/api/index?__path=health`);
+    assert.strictEqual(vercelHealthRes.status, 200, 'Expected /api/index?__path=health -> 200');
+    const vercelHealthJson = await vercelHealthRes.json();
+    assert.strictEqual(vercelHealthJson.service, 'DevOptions Backend');
+    assert.ok(vercelHealthJson.database && typeof vercelHealthJson.database.mode === 'string', 'Expected safe database diagnostics in /api/health');
+
+    const vercelSnapRes = await fetch(`${baseUrl}/api/index?__path=market/snapshot&symbol=R_100`);
+    assert.strictEqual(vercelSnapRes.status, 200, 'Expected /api/index?__path=market/snapshot&symbol=R_100 -> 200');
+    const vercelSnapJson = await vercelSnapRes.json();
+    assert.strictEqual(vercelSnapJson.symbol, 'R_100');
+
+    const raceSuffix = `${Date.now()}`.slice(-6);
+    const raceEmail = `Concurrent.Trader.${raceSuffix}@Example.com`;
+    const racePhone = `0722${raceSuffix}`;
+    const racePass = 'RaceSafe2026!';
+    const raceBody = JSON.stringify({
+      fullName: 'Concurrent Trader',
+      email: raceEmail,
+      phone: racePhone,
+      password: racePass,
+      confirmPassword: racePass,
+    });
+
+    let raceCreatedId: string | null = null;
+    try {
+      // Simulate double-click / simultaneous duplicate registration requests via Vercel rewrite path
+      const [raceResA, raceResB] = await Promise.all([
+        fetch(`${baseUrl}/api/index?__path=auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: raceBody,
+        }),
+        fetch(`${baseUrl}/api/index?__path=auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: raceBody,
+        }),
+      ]);
+      const statuses = [raceResA.status, raceResB.status].sort((a, b) => a - b);
+      assert.deepStrictEqual(statuses, [201, 409], `Expected one 201 and one 409 for simultaneous duplicate registrations, got ${statuses}`);
+
+      const winnerJson = raceResA.status === 201 ? await raceResA.json() : await raceResB.json();
+      raceCreatedId = winnerJson.user?.id || null;
+      assert.ok(raceCreatedId, 'Expected created user ID from winning registration');
+      assert.strictEqual(winnerJson.user.email, raceEmail.toLowerCase(), 'Email must normalize to lowercase');
+
+      // Security hygiene: never expose hashes, salts, or reset tokens
+      const rawWinnerStr = JSON.stringify(winnerJson);
+      assert.ok(!rawWinnerStr.includes('passwordHash') && !rawWinnerStr.includes('password_hash') && !rawWinnerStr.includes('"salt"'), 'Registration response must never expose password hashes or salts');
+
+      // Duplicate email with different casing + different phone must return 409
+      const dupEmailRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: 'Duplicate Email',
+          email: raceEmail.toUpperCase(),
+          phone: `0733${raceSuffix}`,
+          password: racePass,
+          confirmPassword: racePass,
+        }),
+      });
+      assert.strictEqual(dupEmailRes.status, 409, 'Case-insensitive duplicate email must return 409');
+
+      // Duplicate phone with different email must return 409
+      const dupPhoneRes = await fetch(`${baseUrl}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: 'Duplicate Phone',
+          email: `other_${raceSuffix}@example.com`,
+          phone: racePhone,
+          password: racePass,
+          confirmPassword: racePass,
+        }),
+      });
+      assert.strictEqual(dupPhoneRes.status, 409, 'Duplicate phone must return 409');
+
+      // Login via Vercel rewrite with mixed-case email
+      const vercelLoginRes = await fetch(`${baseUrl}/api/index?__path=auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: `  ${raceEmail.toUpperCase()}  `, password: racePass }),
+      });
+      assert.strictEqual(vercelLoginRes.status, 200, 'Expected mixed-case email login via Vercel rewrite to succeed');
+      const vercelLoginJson = await vercelLoginRes.json();
+      assert.ok(vercelLoginJson.token);
+      const rawLoginStr = JSON.stringify(vercelLoginJson);
+      assert.ok(!rawLoginStr.includes('passwordHash') && !rawLoginStr.includes('password_hash') && !rawLoginStr.includes('"salt"'), 'Login response must never expose password hashes or salts');
+
+      // Expired session returns 401 SESSION_EXPIRED and clears cookie
+      const sessRow = localFallbackStore.findSession(vercelLoginJson.token);
+      assert.ok(sessRow, 'Expected session in store');
+      sessRow!.expires_at = Date.now() - 5000;
+      const expiredMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+        headers: { Authorization: `Bearer ${vercelLoginJson.token}` },
+      });
+      assert.strictEqual(expiredMeRes.status, 401, 'Expired session must return 401');
+      const expiredMeJson = await expiredMeRes.json();
+      assert.strictEqual(expiredMeJson.code, 'SESSION_EXPIRED');
+      const clearExpiredCookie = expiredMeRes.headers.get('set-cookie') || '';
+      assert.ok(clearExpiredCookie.includes('Max-Age=0'), 'Expired session must clear session cookie');
+
+      // Logout without active token still succeeds gracefully and clears cookie
+      const guestLogoutRes = await fetch(`${baseUrl}/api/auth/logout`, { method: 'POST' });
+      assert.strictEqual(guestLogoutRes.status, 200);
+      assert.ok((guestLogoutRes.headers.get('set-cookie') || '').includes('Max-Age=0'));
+    } finally {
+      if (raceCreatedId) {
+        localFallbackStore.deleteUser(raceCreatedId);
+      }
+    }
+    console.log('✓ Vercel __path rewrites, concurrency safety, duplicate checks, expired session clearing & secret hygiene verified!');
+
+    // Test 14: Supabase key format & SUPABASE_SERVICE_ROLE_KEY alias detection
+    console.log('\n[Test 14] Testing Supabase opaque vs JWT key detection and env alias support...');
+    assert.strictEqual(isJwtKey('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.sig'), true);
+    assert.strictEqual(isJwtKey('sb_secret_abcdef123456'), false);
+    const prevSecret = process.env.SUPABASE_SECRET_KEY;
+    const prevRole = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const prevUrl = process.env.SUPABASE_URL;
+    try {
+      delete process.env.SUPABASE_SECRET_KEY;
+      process.env.SUPABASE_URL = ' https://demo-proj.supabase.co ';
+      process.env.SUPABASE_SERVICE_ROLE_KEY = ' sb_secret_alias_test ';
+      const cfg = getSupabaseConfig();
+      assert.strictEqual(cfg.url, 'https://demo-proj.supabase.co');
+      assert.strictEqual(cfg.secretKey, 'sb_secret_alias_test');
+      assert.strictEqual(cfg.keyFormat, 'opaque');
+    } finally {
+      if (prevSecret === undefined) delete process.env.SUPABASE_SECRET_KEY;
+      else process.env.SUPABASE_SECRET_KEY = prevSecret;
+      if (prevRole === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = prevRole;
+      if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevUrl;
+    }
+
+    // Verify serverless production refuses ephemeral /tmp fallback when Supabase is unconfigured
+    const prevVercel = process.env.VERCEL;
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevSupaUrl = process.env.SUPABASE_URL;
+    const prevSupaKey = process.env.SUPABASE_SECRET_KEY;
+    try {
+      process.env.VERCEL = '1';
+      process.env.NODE_ENV = 'production';
+      delete process.env.SUPABASE_URL;
+      delete process.env.SUPABASE_SECRET_KEY;
+      const failLoudRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'missing@example.com', password: 'Password123!' }),
+      });
+      assert.strictEqual(failLoudRes.status, 503, 'Serverless production without Supabase must return 503 instead of /tmp fallback');
+      const failLoudJson = await failLoudRes.json();
+      assert.strictEqual(failLoudJson.code, 'DATABASE_UNAVAILABLE');
+    } finally {
+      if (prevVercel === undefined) delete process.env.VERCEL;
+      else process.env.VERCEL = prevVercel;
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevSupaUrl !== undefined) process.env.SUPABASE_URL = prevSupaUrl;
+      if (prevSupaKey !== undefined) process.env.SUPABASE_SECRET_KEY = prevSupaKey;
+    }
+    console.log('✓ Supabase key format detection, env alias support & serverless fail-loud 503 guard verified!');
 
     console.log('\n========================================');
     console.log('All API, Auth, Risk Protection & UI tests PASSED!');

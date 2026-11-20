@@ -959,8 +959,16 @@ export class AuthClient {
     }
 
     const normUser = normalizeUser(data.user);
-    if (data.token && normUser) {
-      this.setSession(data.token, normUser, 'register', data.expiresAt);
+    if (normUser) {
+      if (data.token) {
+        this.setSession(data.token, normUser, 'register', data.expiresAt);
+      } else {
+        if (typeof data.expiresAt === 'number' && Number.isFinite(data.expiresAt)) {
+          this.expiresAt = data.expiresAt;
+          safeStorageSet(EXPIRES_AT_KEY, String(data.expiresAt));
+        }
+        this.updateCachedUser(normUser, 'register_cookie_session');
+      }
     }
     this.recordLog('info', 'REGISTER_SUCCESS', 'Account registered and session started', {
       email: normUser?.email,
@@ -996,8 +1004,16 @@ export class AuthClient {
     }
 
     const normUser = normalizeUser(data.user);
-    if (data.token && normUser) {
-      this.setSession(data.token, normUser, 'login', data.expiresAt);
+    if (normUser) {
+      if (data.token) {
+        this.setSession(data.token, normUser, 'login', data.expiresAt);
+      } else {
+        if (typeof data.expiresAt === 'number' && Number.isFinite(data.expiresAt)) {
+          this.expiresAt = data.expiresAt;
+          safeStorageSet(EXPIRES_AT_KEY, String(data.expiresAt));
+        }
+        this.updateCachedUser(normUser, 'login_cookie_session');
+      }
     }
     this.recordLog('info', 'LOGIN_SUCCESS', 'Sign-in succeeded', {
       userId: normUser?.id,
@@ -1010,10 +1026,11 @@ export class AuthClient {
 
   public async logout(): Promise<void> {
     const token = this.getToken();
+    const hadUser = Boolean(this.currentUser);
     this.recordLog('info', 'LOGOUT_START', 'User initiated sign-out', {
       token: maskToken(token),
     });
-    if (token) {
+    if (token || hadUser) {
       try {
         await fetch('/api/auth/logout', {
           method: 'POST',

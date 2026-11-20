@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { authClient, AuthUser } from '../../services/authClient';
 import { useToast } from '../common/ToastNotification';
 import {
@@ -60,6 +60,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [resetCode, setResetCode] = useState<string>('');
   const [newPassword, setNewPassword] = useState<string>('');
   const [confirmNewPassword, setConfirmNewPassword] = useState<string>('');
+  const submittingRef = useRef<boolean>(false);
 
   const currentUser = authClient.getCurrentUser();
 
@@ -94,10 +95,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // 1. Handle Registration
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current || loading) return;
     setErrorMessage('');
     setSuccessMessage('');
 
-    if (!email || !phone || !password || !confirmPassword) {
+    if (!fullName.trim() || !email.trim() || !phone.trim() || !password || !confirmPassword) {
       setErrorMessage('Please fill in all required registration fields.');
       return;
     }
@@ -111,6 +113,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     let cleanPhone = phone.trim().replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '+');
     if (/^\+0[17]\d{8}$/.test(cleanPhone)) {
       cleanPhone = cleanPhone.slice(1);
+    }
+    if (/^\+2540([17]\d{8})$/.test(cleanPhone)) {
+      cleanPhone = cleanPhone.replace(/^\+2540([17]\d{8})$/, '+254$1');
     }
     let formattedPhone = cleanPhone;
     if (/^0[17]\d{8}$/.test(cleanPhone)) {
@@ -143,9 +148,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    submittingRef.current = true;
     setLoading(true);
     try {
-      const derivedName = (fullName.trim() || email.trim().split('@')[0] || 'Trader');
+      const derivedName = fullName.trim() || email.trim().split('@')[0] || 'Trader';
       const res = await authClient.register({
         fullName: derivedName,
         email: email.trim().toLowerCase(),
@@ -153,12 +159,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         password,
         confirmPassword,
       });
-      showToast('success', 'Account Registered', 'Welcome to DevOptions! Account created successfully.');
-      setMode('verify');
       if (onAuthSuccess) onAuthSuccess(res.user);
+      showToast('success', 'Account Registered', 'Welcome to DevOptions! Your account is active.');
+
+      const devNotice = res.user.devNotice as
+        | { emailOtp?: string; phoneOtp?: string; emailConfigured?: boolean; smsConfigured?: boolean }
+        | undefined;
+      const canVerifyNow = Boolean(
+        devNotice?.emailOtp ||
+          devNotice?.phoneOtp ||
+          devNotice?.emailConfigured ||
+          devNotice?.smsConfigured
+      );
+
+      if (canVerifyNow) {
+        setMode('verify');
+      } else {
+        onClose();
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Registration failed');
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   };
@@ -166,6 +188,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // 2. Handle Login
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current || loading) return;
     setErrorMessage('');
     setSuccessMessage('');
 
@@ -175,6 +198,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
+    submittingRef.current = true;
     setLoading(true);
     try {
       const res = await authClient.login({
@@ -187,6 +211,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     } catch (err: any) {
       setErrorMessage(err.message || 'Login failed');
     } finally {
+      submittingRef.current = false;
       setLoading(false);
     }
   };

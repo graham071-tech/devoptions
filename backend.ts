@@ -3,7 +3,9 @@ import crypto from 'crypto';
 import dotenv from 'dotenv';
 import { paynectaService } from './src/services/paynectaService';
 import {
+  checkSupabaseConnectivity,
   getSupabaseClient,
+  isProductionServerless,
   isSupabaseTransportError,
   markSupabaseUnreachable,
   shouldUseLocalFallback,
@@ -23,18 +25,48 @@ const app = express();
 app.set('trust proxy', 1);
 export { app };
 
+export class DatabaseUnavailableError extends Error {
+  public readonly status = 503;
+  constructor(message = 'Database service is unavailable. Please verify Supabase configuration and connectivity.') {
+    super(message);
+    this.name = 'DatabaseUnavailableError';
+  }
+}
+
+function isProductionRuntime(): boolean {
+  return process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+}
+
+function shouldAllowLocalFallback(): boolean {
+  if (process.env.NODE_ENV === 'test') return true;
+  return !isProductionServerless();
+}
+
 async function withStoreFallback<T>(
   supabaseFn: () => Promise<T>,
   localFn: () => T | Promise<T>
 ): Promise<T> {
   if (await shouldUseLocalFallback()) {
+    if (!shouldAllowLocalFallback()) {
+      const diag = await checkSupabaseConnectivity();
+      console.error('[Supabase Required] Refusing ephemeral /tmp fallback in serverless production:', diag.detail);
+      throw new DatabaseUnavailableError(
+        diag.detail || 'Supabase is not configured or unreachable in this production environment.'
+      );
+    }
     return await localFn();
   }
   try {
     return await supabaseFn();
   } catch (err) {
     if (isSupabaseTransportError(err)) {
-      markSupabaseUnreachable();
+      markSupabaseUnreachable(err instanceof Error ? err.message : undefined);
+      if (!shouldAllowLocalFallback()) {
+        console.error('[Supabase Transport Error] Refusing ephemeral /tmp fallback in serverless production:', err);
+        throw new DatabaseUnavailableError(
+          'Database connection failed. Please try again shortly.'
+        );
+      }
       return await localFn();
     }
     throw err;
@@ -47,17 +79,35 @@ const allowedOrigins = new Set(
     .filter((value): value is string => Boolean(value))
     .map((value) => value.replace(/\/+$/, ''))
 );
-if (process.env.NODE_ENV !== 'production') {
+if (!isProductionRuntime()) {
   allowedOrigins.add('http://localhost:3000');
   allowedOrigins.add('http://localhost:5173');
 }
 
 // Normalize incoming request path across Vercel serverless function invocation styles
+// (including vercel.json rewrites like /api/(.*) -> /api/index?__path=$1).
 app.use((req: Request, _res: Response, next: NextFunction) => {
-  if (req.url.startsWith('/api/index')) {
-    req.url = req.url.replace(/^\/api\/index/, '/api') || '/api';
-  } else if (process.env.VERCEL && !req.url.startsWith('/api') && !req.url.startsWith('/?')) {
-    req.url = '/api' + (req.url.startsWith('/') ? req.url : '/' + req.url);
+  const qIndex = req.url.indexOf('?');
+  const rawPathname = qIndex >= 0 ? req.url.slice(0, qIndex) : req.url;
+  const rawSearch = qIndex >= 0 ? req.url.slice(qIndex + 1) : '';
+  const params = new URLSearchParams(rawSearch);
+  const forwardedPath = params.get('__path');
+
+  if (forwardedPath !== null) {
+    params.delete('__path');
+    const cleanSubpath = forwardedPath.replace(/^\/+/, '');
+    const remainingSearch = params.toString();
+    const targetPath = cleanSubpath ? `/api/${cleanSubpath}` : '/api';
+    req.url = remainingSearch ? `${targetPath}?${remainingSearch}` : targetPath;
+    if (req.query && '__path' in req.query) {
+      delete (req.query as Record<string, any>).__path;
+    }
+  } else if (rawPathname.startsWith('/api/index')) {
+    const normalizedPath = rawPathname.replace(/^\/api\/index/, '/api') || '/api';
+    req.url = rawSearch ? `${normalizedPath}?${rawSearch}` : normalizedPath;
+  } else if (process.env.VERCEL && !rawPathname.startsWith('/api') && !rawPathname.startsWith('/health')) {
+    const prefixedPath = '/api' + (rawPathname.startsWith('/') ? rawPathname : '/' + rawPathname);
+    req.url = rawSearch ? `${prefixedPath}?${rawSearch}` : prefixedPath;
   }
   next();
 });
@@ -105,7 +155,7 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
 
 function isHttpsRequest(req: Request): boolean {
   const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
-  return req.secure || proto === 'https' || process.env.NODE_ENV === 'production';
+  return req.secure || proto === 'https' || isProductionRuntime();
 }
 
 function setSessionCookie(req: Request, res: Response, token: string) {
@@ -218,6 +268,7 @@ function getSessionSigningSecret(): string {
     process.env.AUTH_SESSION_SECRET ||
     process.env.JWT_SECRET ||
     process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
     'devoptions-hmac-session-key-v1'
   );
 }
@@ -436,32 +487,99 @@ interface AuthenticatedRequest extends Request {
   sessionExpiresAt?: number;
 }
 
+function escapeIlike(value: string): string {
+  return value.replace(/[\\%_]/g, '\\$&');
+}
+
+function buildPhoneCandidates(rawIdentifier: string): string[] {
+  const normalized = normalizePhone(rawIdentifier);
+  const stripped = rawIdentifier.trim().replace(/[\s\-\(\)\.]/g, '');
+  const rawPlusPhone = stripped ? `+${stripped.replace(/^\++/, '')}` : '';
+  const digitsOnly = stripped.replace(/\D/g, '');
+  return Array.from(
+    new Set(
+      [normalized, rawPlusPhone, stripped, digitsOnly].filter(
+        (v): v is string => Boolean(v && v.length >= 7)
+      )
+    )
+  );
+}
+
+async function findSupabaseUserByIdentifier(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  identifier: string
+): Promise<{ row: any | null; error: any | null }> {
+  const trimmed = identifier.trim();
+  const isEmail = trimmed.includes('@');
+  if (isEmail) {
+    const normEmail = normalizeEmail(trimmed);
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .ilike('email', escapeIlike(normEmail))
+      .limit(1);
+    if (error) return { row: null, error };
+    if (Array.isArray(data) && data.length > 0) {
+      return { row: data[0], error: null };
+    }
+    const exact = await supabase.from('users').select('*').eq('email', normEmail).limit(1);
+    return { row: exact.data?.[0] ?? null, error: exact.error };
+  }
+
+  const candidates = buildPhoneCandidates(trimmed);
+  if (candidates.length === 0) return { row: null, error: null };
+  const { data, error } = await supabase
+    .from('users')
+    .select('*')
+    .in('phone', candidates)
+    .limit(1);
+  return { row: data?.[0] ?? null, error };
+}
+
+function findLocalUserByIdentifier(identifier: string): any | null {
+  const trimmed = identifier.trim();
+  if (trimmed.includes('@')) {
+    return localFallbackStore.findUserByEmail(normalizeEmail(trimmed));
+  }
+  for (const candidate of buildPhoneCandidates(trimmed)) {
+    const match = localFallbackStore.findUserByPhone(candidate);
+    if (match) return match;
+  }
+  return null;
+}
+
+function extractAuthToken(req: Request): string | undefined {
+  let token: string | undefined;
+
+  // 1. Check Bearer Authorization header
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7).trim();
+  }
+
+  // 2. Check x-auth-token header
+  if (!token && req.headers['x-auth-token']) {
+    token = String(req.headers['x-auth-token']).trim();
+  }
+
+  // 3. Check devoptions_session cookie
+  if (!token && req.headers.cookie) {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies['devoptions_session']) {
+      token = cookies['devoptions_session'].trim();
+    }
+  }
+
+  return token || undefined;
+}
+
 async function requireAuth(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
 ) {
   try {
-    let token: string | undefined;
-
-    // 1. Check Bearer Authorization header
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      token = authHeader.split(' ')[1]?.trim();
-    }
-
-    // 2. Check x-auth-token header
-    if (!token && req.headers['x-auth-token']) {
-      token = String(req.headers['x-auth-token']).trim();
-    }
-
-    // 3. Check devoptions_session cookie
-    if (!token && req.headers.cookie) {
-      const cookies = parseCookies(req.headers.cookie);
-      if (cookies['devoptions_session']) {
-        token = cookies['devoptions_session'].trim();
-      }
-    }
+    const token = extractAuthToken(req);
 
     if (!token) {
       return res.status(401).json({
@@ -474,20 +592,22 @@ async function requireAuth(
     const authResult = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        const { data: session, error: sessionError } = await supabase
+        const { data: sessionRows, error: sessionError } = await supabase
           .from('sessions')
           .select('*')
           .eq('token', token)
-          .maybeSingle();
+          .limit(1);
 
         if (sessionError) {
           if (isSupabaseTransportError(sessionError)) throw sessionError;
           return { status: 500 as const, body: { error: 'Could not verify session.' } };
         }
 
+        const session = sessionRows?.[0];
         if (!session) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Invalid token',
               message: 'Authentication could not be verified.',
@@ -496,10 +616,12 @@ async function requireAuth(
           };
         }
 
-        if (Number(session.expires_at) < Date.now()) {
+        const now = Date.now();
+        if (Number(session.expires_at) < now) {
           await supabase.from('sessions').delete().eq('token', token);
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Session expired',
               message: 'Your session has expired. Please log in again.',
@@ -508,24 +630,42 @@ async function requireAuth(
           };
         }
 
-        const { data: row, error: userError } = await supabase
+        const { data: userRows, error: userError } = await supabase
           .from('users')
           .select('*')
           .eq('id', session.user_id)
-          .maybeSingle();
+          .limit(1);
 
         if (userError) {
           if (isSupabaseTransportError(userError)) throw userError;
           return { status: 500 as const, body: { error: 'Could not verify account.' } };
         }
 
+        const row = userRows?.[0];
         if (!row) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Account inactive',
               message: 'Contact support for assistance.',
               code: 'ACCOUNT_INACTIVE',
+            },
+          };
+        }
+
+        if (
+          row.token_valid_after &&
+          Number(session.created_at) < Number(row.token_valid_after)
+        ) {
+          await supabase.from('sessions').delete().eq('token', token);
+          return {
+            status: 401 as const,
+            clearCookie: true,
+            body: {
+              error: 'Session expired',
+              message: 'Credentials changed. Please log in again.',
+              code: 'SESSION_EXPIRED',
             },
           };
         }
@@ -540,6 +680,7 @@ async function requireAuth(
             localFallbackStore.deleteSession(token!);
             return {
               status: 401 as const,
+              clearCookie: true,
               body: {
                 error: 'Session expired',
                 message: 'Your session has expired. Please log in again.',
@@ -551,6 +692,7 @@ async function requireAuth(
           if (!row) {
             return {
               status: 401 as const,
+              clearCookie: true,
               body: {
                 error: 'Account inactive',
                 message: 'Contact support for assistance.',
@@ -566,6 +708,7 @@ async function requireAuth(
         if (!signed) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Invalid token',
               message: 'Authentication could not be verified.',
@@ -576,6 +719,7 @@ async function requireAuth(
         if (signed.exp < now) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Session expired',
               message: 'Your session has expired. Please log in again.',
@@ -586,6 +730,7 @@ async function requireAuth(
         if (localFallbackStore.isSessionIdRevoked(signed.sid)) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Session expired',
               message: 'Your session has ended. Please log in again.',
@@ -597,6 +742,7 @@ async function requireAuth(
         if (!row) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Account inactive',
               message: 'Contact support for assistance.',
@@ -607,6 +753,7 @@ async function requireAuth(
         if (row.token_valid_after && signed.iat < Number(row.token_valid_after)) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Session expired',
               message: 'Credentials changed. Please log in again.',
@@ -617,6 +764,7 @@ async function requireAuth(
         if (signed.pv !== computePasswordVersion(row.password_hash, row.salt)) {
           return {
             status: 401 as const,
+            clearCookie: true,
             body: {
               error: 'Session expired',
               message: 'Credentials changed. Please log in again.',
@@ -636,6 +784,9 @@ async function requireAuth(
     );
 
     if (authResult.status !== 200) {
+      if ('clearCookie' in authResult && authResult.clearCookie) {
+        clearSessionCookie(req, res);
+      }
       return res.status(authResult.status).json(authResult.body);
     }
 
@@ -645,6 +796,9 @@ async function requireAuth(
 
     return next();
   } catch (err) {
+    if (err instanceof DatabaseUnavailableError) {
+      return res.status(err.status).json({ error: err.message, code: 'DATABASE_UNAVAILABLE' });
+    }
     console.error('[Authentication Error]:', err);
     return res.status(500).json({ error: 'Authentication service unavailable.' });
   }
@@ -660,6 +814,7 @@ async function requireAdmin(req: AuthenticatedRequest, res: Response, next: Next
 }
 
 function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?: string) {
+  const showDevOtps = !isProductionRuntime();
   return {
     id: user.id,
     email: user.email,
@@ -678,9 +833,9 @@ function safeUserResponse(user: UserRecord, lastEmailOtp?: string, lastPhoneOtp?
     devNotice:
       !user.emailVerified || !user.phoneVerified
         ? {
-            emailOtp: process.env.NODE_ENV !== 'production' && !user.emailVerified ? lastEmailOtp || user.emailVerificationCode : undefined,
-            phoneOtp: process.env.NODE_ENV !== 'production' && !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
-            info: process.env.NODE_ENV !== 'production'
+            emailOtp: showDevOtps && !user.emailVerified ? lastEmailOtp || user.emailVerificationCode : undefined,
+            phoneOtp: showDevOtps && !user.phoneVerified ? lastPhoneOtp || user.phoneVerificationCode : undefined,
+            info: showDevOtps
               ? 'Development verification codes are shown in this notice.'
               : [
                   !user.emailVerified && !hasSmtpConfig() ? 'Email delivery is not configured.' : '',
@@ -755,15 +910,54 @@ async function dispatchPasswordReset(user: UserRecord, isEmail: boolean, code: s
 // AUTHENTICATION API ROUTES
 // ─────────────────────────────────────────────────────────────
 
+const registrationInFlightLocks = new Map<string, Promise<unknown>>();
+async function withRegistrationLock<T>(keys: string[], fn: () => Promise<T>): Promise<T> {
+  const uniqueKeys = Array.from(new Set(keys.filter(Boolean))).sort();
+  if (uniqueKeys.length === 0) return fn();
+
+  // Wait on any active lock sharing an email or phone key before entering
+  const existing = uniqueKeys
+    .map((k) => registrationInFlightLocks.get(k))
+    .filter((p): p is Promise<unknown> => Boolean(p));
+  if (existing.length > 0) {
+    await Promise.allSettled(existing);
+  }
+
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  for (const k of uniqueKeys) {
+    registrationInFlightLocks.set(k, barrier);
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of uniqueKeys) {
+      if (registrationInFlightLocks.get(k) === barrier) {
+        registrationInFlightLocks.delete(k);
+      }
+    }
+    release();
+  }
+}
+
 // 1. REGISTER
 app.post(
   '/api/auth/register',
   rateLimitMiddleware(10, 60000),
   async (req: Request, res: Response) => {
     try {
-      const { email, phone, password, confirmPassword, fullName, name } = req.body || {};
+      const { email, phone, password, confirmPassword, fullName, name, country } = req.body || {};
 
-      if (!email || !phone || !password) {
+      if (
+        typeof email !== 'string' ||
+        typeof phone !== 'string' ||
+        typeof password !== 'string' ||
+        !email.trim() ||
+        !phone.trim() ||
+        !password
+      ) {
         return res.status(400).json({
           error: 'Email, phone number, and password are required.',
           message: 'Email, phone number, and password are required.',
@@ -788,13 +982,24 @@ app.post(
         return res.status(400).json({ error: passCheck.message });
       }
 
-      if (!confirmPassword) {
+      if (typeof confirmPassword !== 'string' || !confirmPassword) {
         return res.status(400).json({ error: 'Please confirm your password.' });
       }
 
       if (password !== confirmPassword) {
         return res.status(400).json({ error: 'Passwords do not match.' });
       }
+
+      const rawName = typeof fullName === 'string' && fullName.trim()
+        ? fullName.trim()
+        : typeof name === 'string' && name.trim()
+        ? name.trim()
+        : normEmail.split('@')[0] || 'Trader';
+      const safeFullName = rawName.slice(0, 120);
+      const safeCountry =
+        typeof country === 'string' && country.trim()
+          ? country.trim().slice(0, 64)
+          : 'International';
 
       const salt = crypto.randomBytes(16).toString('hex');
       const passwordHash = hashPassword(password, salt);
@@ -812,6 +1017,7 @@ app.post(
         phone: normPhone,
         passwordHash,
         salt,
+        role: 'user',
         createdAt: now,
         emailVerified: false,
         phoneVerified: false,
@@ -821,170 +1027,176 @@ app.post(
         phoneVerificationExpires: otpExpiry,
         demoBalance: 10000,
         realBalance: 0,
-        fullName: (fullName || name || normEmail.split('@')[0] || 'Trader').trim(),
-        country: 'International',
+        fullName: safeFullName,
+        country: safeCountry,
       };
 
-      const regResult = await withStoreFallback(
-        async () => {
-          const supabase = getSupabaseClient();
+      const regResult = await withRegistrationLock(
+        [`email:${normEmail}`, `phone:${normPhone}`],
+        () =>
+          withStoreFallback(
+            async () => {
+              const supabase = getSupabaseClient();
 
-          const { data: existingEmail, error: emailLookupErr } = await supabase
-            .from('users')
-            .select('id')
-            .eq('email', normEmail)
-            .maybeSingle();
+              const { data: existingEmailRows, error: emailLookupErr } = await supabase
+                .from('users')
+                .select('id')
+                .ilike('email', escapeIlike(normEmail))
+                .limit(1);
 
-          if (emailLookupErr && isSupabaseTransportError(emailLookupErr)) {
-            throw emailLookupErr;
-          }
-          if (existingEmail) {
-            return {
-              status: 409 as const,
-              body: {
-                error: 'An account with this email address already exists.',
-                message: 'An account with this email address already exists.',
-              },
-            };
-          }
+              if (emailLookupErr) {
+                if (isSupabaseTransportError(emailLookupErr)) throw emailLookupErr;
+                throw emailLookupErr;
+              }
+              if (existingEmailRows && existingEmailRows.length > 0) {
+                return {
+                  status: 409 as const,
+                  body: {
+                    error: 'An account with this email address already exists.',
+                    message: 'An account with this email address already exists.',
+                  },
+                };
+              }
 
-          const { data: existingPhone, error: phoneLookupErr } = await supabase
-            .from('users')
-            .select('id')
-            .eq('phone', normPhone)
-            .maybeSingle();
+              const { data: existingPhoneRows, error: phoneLookupErr } = await supabase
+                .from('users')
+                .select('id')
+                .eq('phone', normPhone)
+                .limit(1);
 
-          if (phoneLookupErr && isSupabaseTransportError(phoneLookupErr)) {
-            throw phoneLookupErr;
-          }
-          if (existingPhone) {
-            return {
-              status: 409 as const,
-              body: {
-                error: 'An account with this phone number already exists.',
-                message: 'An account with this phone number already exists.',
-              },
-            };
-          }
+              if (phoneLookupErr) {
+                if (isSupabaseTransportError(phoneLookupErr)) throw phoneLookupErr;
+                throw phoneLookupErr;
+              }
+              if (existingPhoneRows && existingPhoneRows.length > 0) {
+                return {
+                  status: 409 as const,
+                  body: {
+                    error: 'An account with this phone number already exists.',
+                    message: 'An account with this phone number already exists.',
+                  },
+                };
+              }
 
-          const { error: userError } = await supabase.from('users').insert({
-            id: newUser.id,
-            email: newUser.email,
-            phone: newUser.phone,
-            password_hash: newUser.passwordHash,
-            salt: newUser.salt,
-            role: 'user',
-            created_at: newUser.createdAt,
-            email_verified: false,
-            phone_verified: false,
-            email_verification_code: emailOtp,
-            email_verification_expires: otpExpiry,
-            phone_verification_code: phoneOtp,
-            phone_verification_expires: otpExpiry,
-            demo_balance: newUser.demoBalance,
-            real_balance: newUser.realBalance,
-            full_name: newUser.fullName,
-            country: newUser.country,
-          });
+              const { error: userError } = await supabase.from('users').insert({
+                id: newUser.id,
+                email: newUser.email,
+                phone: newUser.phone,
+                password_hash: newUser.passwordHash,
+                salt: newUser.salt,
+                role: 'user',
+                created_at: newUser.createdAt,
+                email_verified: false,
+                phone_verified: false,
+                email_verification_code: emailOtp,
+                email_verification_expires: otpExpiry,
+                phone_verification_code: phoneOtp,
+                phone_verification_expires: otpExpiry,
+                demo_balance: newUser.demoBalance,
+                real_balance: newUser.realBalance,
+                full_name: newUser.fullName,
+                country: newUser.country,
+              });
 
-          if (userError) {
-            if (isSupabaseTransportError(userError)) throw userError;
-            console.error('[Supabase Registration Error]:', userError);
+              if (userError) {
+                if (isSupabaseTransportError(userError)) throw userError;
+                console.error('[Supabase Registration Error]:', userError);
 
-            if (userError.code === '23505') {
-              return {
-                status: 409 as const,
-                body: {
-                  error: 'An account with this email address or phone number already exists.',
-                  message: 'An account with this email address or phone number already exists.',
-                },
-              };
+                if (userError.code === '23505') {
+                  return {
+                    status: 409 as const,
+                    body: {
+                      error: 'An account with this email address or phone number already exists.',
+                      message: 'An account with this email address or phone number already exists.',
+                    },
+                  };
+                }
+
+                return {
+                  status: 500 as const,
+                  body: {
+                    error: 'Could not create your account.',
+                    message: 'Could not create your account.',
+                  },
+                };
+              }
+
+              const { error: sessionError } = await supabase.from('sessions').insert({
+                token: sessionToken,
+                user_id: newUser.id,
+                created_at: now,
+                expires_at: sessionExpiry,
+              });
+
+              if (sessionError) {
+                if (isSupabaseTransportError(sessionError)) throw sessionError;
+                console.error('[Supabase Registration Session Error]:', sessionError);
+                await supabase.from('users').delete().eq('id', newUser.id);
+
+                return {
+                  status: 500 as const,
+                  body: {
+                    error: 'Your account was created, but we could not start your session. Please try logging in.',
+                    message: 'Your account was created, but we could not start your session. Please try logging in.',
+                  },
+                };
+              }
+
+              return { status: 201 as const };
+            },
+            () => {
+              if (localFallbackStore.findUserByEmail(normEmail)) {
+                return {
+                  status: 409 as const,
+                  body: {
+                    error: 'An account with this email address already exists.',
+                    message: 'An account with this email address already exists.',
+                  },
+                };
+              }
+              if (localFallbackStore.findUserByPhone(normPhone)) {
+                return {
+                  status: 409 as const,
+                  body: {
+                    error: 'An account with this phone number already exists.',
+                    message: 'An account with this phone number already exists.',
+                  },
+                };
+              }
+              const { error: userError } = localFallbackStore.insertUser({
+                id: newUser.id,
+                email: newUser.email,
+                phone: newUser.phone,
+                password_hash: newUser.passwordHash,
+                salt: newUser.salt,
+                role: 'user',
+                created_at: newUser.createdAt,
+                email_verified: false,
+                phone_verified: false,
+                email_verification_code: emailOtp,
+                email_verification_expires: otpExpiry,
+                phone_verification_code: phoneOtp,
+                phone_verification_expires: otpExpiry,
+                demo_balance: newUser.demoBalance,
+                real_balance: newUser.realBalance,
+                full_name: newUser.fullName || null,
+                country: newUser.country || 'International',
+              });
+              if (userError) {
+                return {
+                  status: 409 as const,
+                  body: { error: userError.message, message: userError.message },
+                };
+              }
+              localFallbackStore.insertSession({
+                token: sessionToken,
+                user_id: newUser.id,
+                created_at: now,
+                expires_at: sessionExpiry,
+              });
+              return { status: 201 as const };
             }
-
-            return {
-              status: 500 as const,
-              body: {
-                error: 'Could not create your account.',
-                message: 'Could not create your account.',
-              },
-            };
-          }
-
-          const { error: sessionError } = await supabase.from('sessions').insert({
-            token: sessionToken,
-            user_id: newUser.id,
-            created_at: now,
-            expires_at: now + 7 * 24 * 60 * 60 * 1000,
-          });
-
-          if (sessionError) {
-            if (isSupabaseTransportError(sessionError)) throw sessionError;
-            console.error('[Supabase Registration Session Error]:', sessionError);
-            await supabase.from('users').delete().eq('id', newUser.id);
-
-            return {
-              status: 500 as const,
-              body: {
-                error: 'Your account was created, but we could not start your session. Please try logging in.',
-                message: 'Your account was created, but we could not start your session. Please try logging in.',
-              },
-            };
-          }
-
-          return { status: 201 as const };
-        },
-        () => {
-          if (localFallbackStore.findUserByEmail(normEmail)) {
-            return {
-              status: 409 as const,
-              body: {
-                error: 'An account with this email address already exists.',
-                message: 'An account with this email address already exists.',
-              },
-            };
-          }
-          if (localFallbackStore.findUserByPhone(normPhone)) {
-            return {
-              status: 409 as const,
-              body: {
-                error: 'An account with this phone number already exists.',
-                message: 'An account with this phone number already exists.',
-              },
-            };
-          }
-          const { error: userError } = localFallbackStore.insertUser({
-            id: newUser.id,
-            email: newUser.email,
-            phone: newUser.phone,
-            password_hash: newUser.passwordHash,
-            salt: newUser.salt,
-            role: 'user',
-            created_at: newUser.createdAt,
-            email_verified: false,
-            phone_verified: false,
-            email_verification_code: emailOtp,
-            email_verification_expires: otpExpiry,
-            phone_verification_code: phoneOtp,
-            phone_verification_expires: otpExpiry,
-            demo_balance: newUser.demoBalance,
-            real_balance: newUser.realBalance,
-            full_name: newUser.fullName || null,
-            country: newUser.country || 'International',
-          });
-          if (userError) {
-            return {
-              status: 409 as const,
-              body: { error: userError.message, message: userError.message },
-            };
-          }
-          localFallbackStore.insertSession({
-            token: sessionToken,
-            user_id: newUser.id,
-            created_at: now,
-            expires_at: now + 7 * 24 * 60 * 60 * 1000,
-          });
-          return { status: 201 as const };
-        }
+          )
       );
 
       if (regResult.status !== 201) {
@@ -993,28 +1205,31 @@ app.post(
 
       setSessionCookie(req, res, sessionToken);
 
-      const isDevelopment = process.env.NODE_ENV !== 'production';
+      const showDevOtps = !isProductionRuntime();
       await dispatchVerificationCodes(newUser, emailOtp, phoneOtp);
 
-      if (isDevelopment) {
+      if (showDevOtps) {
         console.log(`[DevOptions Auth] New User Registered: ${normEmail}`);
       }
 
       const safeUser = safeUserResponse(
         newUser,
-        isDevelopment ? emailOtp : undefined,
-        isDevelopment ? phoneOtp : undefined
+        showDevOtps ? emailOtp : undefined,
+        showDevOtps ? phoneOtp : undefined
       );
 
       return res.status(201).json({
         success: true,
-        message: 'Account registered successfully. Please verify your contact details.',
+        message: 'Account registered successfully.',
         token: sessionToken,
         expiresAt: sessionExpiry,
         user: safeUser,
         balances: { demo: newUser.demoBalance, real: newUser.realBalance },
       });
     } catch (err) {
+      if (err instanceof DatabaseUnavailableError) {
+        return res.status(err.status).json({ error: err.message, code: 'DATABASE_UNAVAILABLE' });
+      }
       console.error('[Registration Error]:', err);
       return res.status(500).json({ error: 'Registration service is unavailable.' });
     }
@@ -1089,44 +1304,20 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
     const identifier = rawId.trim();
     const isEmail = identifier.includes('@');
     const normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
-    const rawPlusPhone = !isEmail
-      ? '+' + identifier.replace(/[\s\-\(\)\.]/g, '').replace(/^\++/, '')
-      : '';
+    const phoneCandidates = !isEmail ? buildPhoneCandidates(identifier) : [];
     const now = Date.now();
     const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
 
     const loginResult = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        let { data: row, error } = await supabase
-          .from('users')
-          .select('*')
-          .eq(isEmail ? 'email' : 'phone', normalized)
-          .maybeSingle();
-        if (!error && !row && isEmail) {
-          const escaped = normalized.replace(/[\\%_]/g, '\\$&');
-          const ciQuery = await supabase
-            .from('users')
-            .select('*')
-            .ilike('email', escaped)
-            .maybeSingle();
-          row = ciQuery.data;
-          error = ciQuery.error;
-        }
-        if (!error && !row && !isEmail && rawPlusPhone && rawPlusPhone !== normalized) {
-          const fallbackQuery = await supabase
-            .from('users')
-            .select('*')
-            .eq('phone', rawPlusPhone)
-            .maybeSingle();
-          row = fallbackQuery.data;
-          error = fallbackQuery.error;
-        }
+        let { row, error } = await findSupabaseUserByIdentifier(supabase, identifier);
+
         if (!error && !row) {
           const seededAdmin = SEEDED_ADMINS.find((adm) =>
             isEmail
               ? adm.email.toLowerCase() === normalized
-              : adm.phone === normalized || (Boolean(rawPlusPhone) && adm.phone === rawPlusPhone)
+              : phoneCandidates.includes(adm.phone)
           );
           if (seededAdmin) {
             const { data: insertedAdmin, error: seedError } = await supabase
@@ -1147,9 +1338,9 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
                 country: seededAdmin.country || 'International',
               })
               .select('*')
-              .maybeSingle();
-            if (!seedError && insertedAdmin) {
-              row = insertedAdmin;
+              .limit(1);
+            if (!seedError && insertedAdmin && insertedAdmin.length > 0) {
+              row = insertedAdmin[0];
             } else if (seedError && isSupabaseTransportError(seedError)) {
               throw seedError;
             }
@@ -1165,7 +1356,7 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
             (adm) => adm.email.toLowerCase() === 'francisgraham071@gmail.com'
           );
           if (targetSeed) {
-            const { data: upgradedAdmin, error: upgradeError } = await supabase
+            const { data: upgradedAdmins, error: upgradeError } = await supabase
               .from('users')
               .update({
                 salt: targetSeed.salt,
@@ -1176,21 +1367,35 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
               })
               .eq('id', row.id)
               .select('*')
-              .maybeSingle();
-            if (!upgradeError && upgradedAdmin) {
-              row = upgradedAdmin;
+              .limit(1);
+            if (!upgradeError && upgradedAdmins && upgradedAdmins.length > 0) {
+              row = upgradedAdmins[0];
               await supabase.from('sessions').delete().eq('user_id', row.id);
             } else if (upgradeError && isSupabaseTransportError(upgradeError)) {
               throw upgradeError;
             }
           }
         }
-        if (error) throw error;
-        if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
+        if (error) {
+          if (isSupabaseTransportError(error)) throw error;
+          throw error;
+        }
+        if (
+          !row ||
+          !verifyPassword(
+            password,
+            String(row.salt || '').trim(),
+            String(row.password_hash || '').trim()
+          )
+        ) {
           return { status: 401 as const };
         }
         const token = issueSignedSessionToken(
-          { id: row.id, passwordHash: row.password_hash, salt: row.salt },
+          {
+            id: row.id,
+            passwordHash: String(row.password_hash || '').trim(),
+            salt: String(row.salt || '').trim(),
+          },
           now,
           expiresAt
         );
@@ -1201,17 +1406,23 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
         return { status: 200 as const, row, token };
       },
       () => {
-        let row = isEmail
-          ? localFallbackStore.findUserByEmail(normalized)
-          : localFallbackStore.findUserByPhone(normalized);
-        if (!row && !isEmail && rawPlusPhone && rawPlusPhone !== normalized) {
-          row = localFallbackStore.findUserByPhone(rawPlusPhone);
-        }
-        if (!row || !verifyPassword(password, row.salt, row.password_hash)) {
+        const row = findLocalUserByIdentifier(identifier);
+        if (
+          !row ||
+          !verifyPassword(
+            password,
+            String(row.salt || '').trim(),
+            String(row.password_hash || '').trim()
+          )
+        ) {
           return { status: 401 as const };
         }
         const token = issueSignedSessionToken(
-          { id: row.id, passwordHash: row.password_hash, salt: row.salt },
+          {
+            id: row.id,
+            passwordHash: String(row.password_hash || '').trim(),
+            salt: String(row.salt || '').trim(),
+          },
           now,
           expiresAt
         );
@@ -1240,6 +1451,13 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
       balances: { demo: safeUser.demoBalance, real: safeUser.realBalance },
     });
   } catch (error) {
+    if (error instanceof DatabaseUnavailableError) {
+      return res.status(error.status).json({
+        error: error.message,
+        message: error.message,
+        code: 'DATABASE_UNAVAILABLE',
+      });
+    }
     console.error('[Login Error]:', error);
     return res.status(500).json({
       error: 'Login service is unavailable.',
@@ -1249,26 +1467,31 @@ app.post('/api/auth/login', loginFailureRateLimitMiddleware(20, 60000), async (r
 });
 
 // 3. LOGOUT
-app.post('/api/auth/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+app.post('/api/auth/logout', async (req: AuthenticatedRequest, res: Response) => {
   try {
-    await withStoreFallback(
-      async () => {
-        const { error } = await getSupabaseClient().from('sessions').delete().eq('token', req.sessionToken);
-        if (error) throw error;
-      },
-      () => {
-        if (req.sessionToken) {
-          localFallbackStore.deleteSession(req.sessionToken);
-          const signed = verifySignedSessionToken(req.sessionToken);
+    const token = extractAuthToken(req);
+    if (token) {
+      await withStoreFallback(
+        async () => {
+          const { error } = await getSupabaseClient().from('sessions').delete().eq('token', token);
+          if (error) throw error;
+        },
+        () => {
+          localFallbackStore.deleteSession(token);
+          const signed = verifySignedSessionToken(token);
           if (signed) {
             localFallbackStore.revokeSessionId(signed.sid, signed.exp);
           }
         }
-      }
-    );
+      );
+    }
     clearSessionCookie(req, res);
     return res.json({ message: 'Logged out successfully.' });
   } catch (error) {
+    clearSessionCookie(req, res);
+    if (error instanceof DatabaseUnavailableError) {
+      return res.status(error.status).json({ error: error.message, code: 'DATABASE_UNAVAILABLE' });
+    }
     console.error('[Logout Error]:', error);
     return res.status(500).json({ error: 'Could not log out. Please try again.' });
   }
@@ -1288,6 +1511,7 @@ async function rotateSessionToken(
     nextExpiresAt
   );
   const oldToken = req.sessionToken;
+  const graceExpiry = Math.min(req.sessionExpiresAt || now + 30_000, now + 30_000);
 
   await withStoreFallback(
     async () => {
@@ -1300,8 +1524,10 @@ async function rotateSessionToken(
       });
       if (error) throw error;
       if (oldToken && oldToken !== newToken) {
-        await supabase.from('sessions').delete().eq('token', oldToken);
+        // Short 30s grace window prevents parallel in-flight requests from racing into 401
+        await supabase.from('sessions').update({ expires_at: graceExpiry }).eq('token', oldToken);
       }
+      await supabase.from('sessions').delete().eq('user_id', user.id).lt('expires_at', now);
     },
     () => {
       localFallbackStore.insertSession({
@@ -1311,7 +1537,10 @@ async function rotateSessionToken(
         expires_at: nextExpiresAt,
       });
       if (oldToken && oldToken !== newToken) {
-        localFallbackStore.deleteSession(oldToken);
+        const prev = localFallbackStore.findSession(oldToken);
+        if (prev) {
+          localFallbackStore.insertSession({ ...prev, expires_at: graceExpiry });
+        }
       }
     }
   );
@@ -1361,6 +1590,9 @@ app.post('/api/auth/refresh', requireAuth, rateLimitMiddleware(60, 60000), async
       user: safeUserResponse(req.user!),
     });
   } catch (error) {
+    if (error instanceof DatabaseUnavailableError) {
+      return res.status(error.status).json({ error: error.message, code: 'DATABASE_UNAVAILABLE' });
+    }
     console.error('[Token Refresh Error]:', error);
     return res.status(500).json({ error: 'Could not refresh session.' });
   }
@@ -1421,10 +1653,14 @@ app.post('/api/auth/resend-code', requireAuth, rateLimitMiddleware(5, 60000), as
     );
     const updated = userFromRow(data);
     await dispatchVerificationCodes(updated, type === 'email' ? otp : undefined, type === 'phone' ? otp : undefined);
+    const showDevOtps = !isProductionRuntime();
     return res.json({
       message: `New ${type} verification code generated.`,
-      user: safeUserResponse(updated, type === 'email' && process.env.NODE_ENV !== 'production' ? otp : undefined,
-        type === 'phone' && process.env.NODE_ENV !== 'production' ? otp : undefined),
+      user: safeUserResponse(
+        updated,
+        type === 'email' && showDevOtps ? otp : undefined,
+        type === 'phone' && showDevOtps ? otp : undefined
+      ),
     });
   } catch (error) {
     console.error('[Resend Error]:', error);
@@ -1437,24 +1673,27 @@ app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req:
   try {
     const identifier = req.body?.identifier;
     if (typeof identifier !== 'string' || !identifier.trim()) return res.status(400).json({ error: 'Please provide your registered email or phone number.' });
-    const isEmail = identifier.trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
+    const isEmail = identifier.trim().includes('@');
     const generic = 'If an account matches that contact method, a verification code has been dispatched.';
     const otp = generateSecureOtp(), expiry = Date.now() + 30 * 60 * 1000;
 
     const resetUserRow = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        const { data: row, error } = await supabase.from('users').select('id').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        const { row, error } = await findSupabaseUserByIdentifier(supabase, identifier);
         if (error) throw error;
         if (!row) return null;
-        const { data: updatedRow, error: updateError } = await supabase.from('users').update({ reset_password_token: otp, reset_password_expires: expiry }).eq('id', row.id).select('*').single();
+        const { data: updatedRow, error: updateError } = await supabase
+          .from('users')
+          .update({ reset_password_token: otp, reset_password_expires: expiry })
+          .eq('id', row.id)
+          .select('*')
+          .single();
         if (updateError) throw updateError;
         return updatedRow;
       },
       () => {
-        const row = isEmail
-          ? localFallbackStore.findUserByEmail(normalized)
-          : localFallbackStore.findUserByPhone(normalized);
+        const row = findLocalUserByIdentifier(identifier);
         if (!row) return null;
         return localFallbackStore.updateUser(row.id, { reset_password_token: otp, reset_password_expires: expiry });
       }
@@ -1465,11 +1704,11 @@ app.post('/api/auth/forgot-password', rateLimitMiddleware(5, 60000), async (req:
       return res.json({ message: generic, deliveryConfigured });
     }
     await dispatchPasswordReset(userFromRow(resetUserRow), isEmail, otp);
-    // OTP is returned only in development; production codes are delivered out-of-band.
+    // OTP is returned only in non-production environments; production codes are delivered out-of-band.
     return res.json({
       message: generic,
       deliveryConfigured,
-      ...(process.env.NODE_ENV !== 'production' ? { devOtp: otp } : {}),
+      ...(!isProductionRuntime() ? { devOtp: otp } : {}),
     });
   } catch (error) {
     console.error('[Forgot Password Error]:', error);
@@ -1485,7 +1724,6 @@ app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req:
     const passCheck = validatePasswordSecurity(newPassword);
     if (!passCheck.isValid) return res.status(400).json({ error: passCheck.message });
     if (confirmPassword && newPassword !== confirmPassword) return res.status(400).json({ error: 'Passwords do not match.' });
-    const isEmail = String(identifier).trim().includes('@'), normalized = isEmail ? normalizeEmail(identifier) : normalizePhone(identifier);
     const salt = crypto.randomBytes(16).toString('hex');
     const passwordHash = hashPassword(newPassword, salt);
     const now = Date.now();
@@ -1493,23 +1731,38 @@ app.post('/api/auth/reset-password', rateLimitMiddleware(10, 60000), async (req:
     const ok = await withStoreFallback(
       async () => {
         const supabase = getSupabaseClient();
-        const { data: row, error } = await supabase.from('users').select('*').eq(isEmail ? 'email' : 'phone', normalized).maybeSingle();
+        const { row, error } = await findSupabaseUserByIdentifier(supabase, String(identifier));
         if (error) throw error;
         if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < now) {
           return false;
         }
         const { error: updateError } = await supabase.from('users').update({
-          salt, password_hash: passwordHash, reset_password_token: null, reset_password_expires: null,
+          salt,
+          password_hash: passwordHash,
+          reset_password_token: null,
+          reset_password_expires: null,
+          token_valid_after: now,
         }).eq('id', row.id);
-        if (updateError) throw updateError;
+        if (updateError) {
+          // Graceful fallback if token_valid_after column migration hasn't been applied yet on Supabase
+          if (String(updateError.message || '').includes('token_valid_after')) {
+            const { error: retryErr } = await supabase.from('users').update({
+              salt,
+              password_hash: passwordHash,
+              reset_password_token: null,
+              reset_password_expires: null,
+            }).eq('id', row.id);
+            if (retryErr) throw retryErr;
+          } else {
+            throw updateError;
+          }
+        }
         const { error: sessionError } = await supabase.from('sessions').delete().eq('user_id', row.id);
         if (sessionError) throw sessionError;
         return true;
       },
       () => {
-        const row = isEmail
-          ? localFallbackStore.findUserByEmail(normalized)
-          : localFallbackStore.findUserByPhone(normalized);
+        const row = findLocalUserByIdentifier(String(identifier));
         if (!row || row.reset_password_token !== String(code).trim() || !row.reset_password_expires || Number(row.reset_password_expires) < now) {
           return false;
         }
@@ -3112,8 +3365,25 @@ app.get('/api/market/stream', async (req: Request, res: Response) => {
 });
 
 // 13. HEALTH CHECK
-app.get(['/api/health', '/api', '/health'], (req: Request, res: Response) => {
-  return res.json({ status: 'ok', service: 'DevOptions Backend', timestamp: Date.now() });
+app.get(['/api/health', '/api', '/health'], async (_req: Request, res: Response) => {
+  const dbStatus = await checkSupabaseConnectivity();
+  const mode = dbStatus.configured && dbStatus.reachable
+    ? 'supabase'
+    : shouldAllowLocalFallback()
+    ? 'local_store'
+    : 'misconfigured';
+
+  return res.json({
+    status: mode === 'misconfigured' ? 'degraded' : 'ok',
+    service: 'DevOptions Backend',
+    timestamp: Date.now(),
+    database: {
+      mode,
+      configured: dbStatus.configured,
+      reachable: dbStatus.reachable,
+      keyFormat: dbStatus.keyFormat,
+    },
+  });
 });
 
 // Fallback for unmatched API routes to guarantee a JSON response (never HTML)
@@ -3121,6 +3391,20 @@ app.all('/api/*', (req: Request, res: Response) => {
   return res.status(404).json({
     error: `API route not found: ${req.method} ${req.path}`,
     status: 404,
+  });
+});
+
+// Centralized API JSON error middleware
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  if (err instanceof DatabaseUnavailableError) {
+    return res.status(err.status).json({
+      error: err.message,
+      code: 'DATABASE_UNAVAILABLE',
+    });
+  }
+  console.error('[Unhandled Server Error]:', err);
+  return res.status(err?.status || 500).json({
+    error: 'Internal server error.',
   });
 });
 

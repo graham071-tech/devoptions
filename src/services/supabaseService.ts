@@ -1,23 +1,79 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 let supabaseClient: SupabaseClient | null = null;
-let supabaseStatusCache: { reachable: boolean; checkedAt: number } | null = null;
+let supabaseClientSignature = '';
+let supabaseStatusCache: { reachable: boolean; checkedAt: number; detail?: string } | null = null;
 const REACHABLE_CACHE_MS = 30_000;
 const UNREACHABLE_CACHE_MS = 5_000;
 
-export function getSupabaseClient(): SupabaseClient {
-  if (supabaseClient) {
-    return supabaseClient;
-  }
+export function getSupabaseConfig(): {
+  url: string | null;
+  secretKey: string | null;
+  keyFormat: 'jwt' | 'opaque' | 'missing';
+} {
+  const url = (
+    process.env.SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    ''
+  ).trim() || null;
 
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY;
+  const secretKey = (
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim() || null;
+
+  const keyFormat: 'jwt' | 'opaque' | 'missing' = !secretKey
+    ? 'missing'
+    : isJwtKey(secretKey)
+    ? 'jwt'
+    : 'opaque';
+
+  return { url, secretKey, keyFormat };
+}
+
+export function isJwtKey(key: string): boolean {
+  const trimmed = key.trim();
+  return trimmed.startsWith('eyJ') && trimmed.split('.').length === 3;
+}
+
+export function isProductionServerless(): boolean {
+  return Boolean(process.env.VERCEL);
+}
+
+export function getSupabaseClient(): SupabaseClient {
+  const { url: supabaseUrl, secretKey: supabaseSecretKey } = getSupabaseConfig();
 
   if (!supabaseUrl || !supabaseSecretKey) {
     throw new Error(
-      'Supabase configuration is missing. Check SUPABASE_URL and SUPABASE_SECRET_KEY.'
+      'Supabase configuration is missing. Check SUPABASE_URL and SUPABASE_SECRET_KEY (or SUPABASE_SERVICE_ROLE_KEY).'
     );
   }
+
+  const signature = `${supabaseUrl}::${supabaseSecretKey.slice(0, 12)}::${supabaseSecretKey.length}`;
+  if (supabaseClient && supabaseClientSignature === signature) {
+    return supabaseClient;
+  }
+
+  // Opaque Supabase secret keys (`sb_secret_*`) are not JWTs.
+  // `@supabase/supabase-js` copies the API key into `Authorization: Bearer <key>`,
+  // which causes PostgREST to reject opaque secret keys as invalid JWTs.
+  // Strip that copied Authorization header when the key is opaque while keeping `apikey`.
+  const opaqueKey = !isJwtKey(supabaseSecretKey);
+  const customFetch: typeof fetch = async (input, init) => {
+    if (!opaqueKey) {
+      return fetch(input, init);
+    }
+    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+    const auth = headers.get('authorization');
+    if (auth && auth.trim() === `Bearer ${supabaseSecretKey}`) {
+      headers.delete('authorization');
+    }
+    return fetch(input, {
+      ...init,
+      headers,
+    });
+  };
 
   supabaseClient = createClient(supabaseUrl, supabaseSecretKey, {
     auth: {
@@ -25,7 +81,11 @@ export function getSupabaseClient(): SupabaseClient {
       persistSession: false,
       detectSessionInUrl: false,
     },
+    global: {
+      fetch: customFetch,
+    },
   });
+  supabaseClientSignature = signature;
 
   return supabaseClient;
 }
@@ -58,23 +118,43 @@ export function isSupabaseTransportError(err: any): boolean {
   );
 }
 
-export function markSupabaseUnreachable(): void {
-  supabaseStatusCache = { reachable: false, checkedAt: Date.now() };
+export function markSupabaseUnreachable(detail?: string): void {
+  supabaseStatusCache = { reachable: false, checkedAt: Date.now(), detail };
 }
 
-export async function shouldUseLocalFallback(): Promise<boolean> {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseSecretKey = process.env.SUPABASE_SECRET_KEY;
+export function resetSupabaseStatusCache(): void {
+  supabaseClient = null;
+  supabaseClientSignature = '';
+  supabaseStatusCache = null;
+}
+
+export async function checkSupabaseConnectivity(): Promise<{
+  configured: boolean;
+  reachable: boolean;
+  keyFormat: 'jwt' | 'opaque' | 'missing';
+  detail?: string;
+}> {
+  const { url: supabaseUrl, secretKey: supabaseSecretKey, keyFormat } = getSupabaseConfig();
 
   if (!supabaseUrl || !supabaseSecretKey) {
-    return true;
+    return {
+      configured: false,
+      reachable: false,
+      keyFormat,
+      detail: 'Missing SUPABASE_URL or SUPABASE_SECRET_KEY / SUPABASE_SERVICE_ROLE_KEY.',
+    };
   }
 
   const now = Date.now();
   if (supabaseStatusCache) {
     const ttl = supabaseStatusCache.reachable ? REACHABLE_CACHE_MS : UNREACHABLE_CACHE_MS;
     if (now - supabaseStatusCache.checkedAt < ttl) {
-      return !supabaseStatusCache.reachable;
+      return {
+        configured: true,
+        reachable: supabaseStatusCache.reachable,
+        keyFormat,
+        detail: supabaseStatusCache.detail,
+      };
     }
   }
 
@@ -82,30 +162,49 @@ export async function shouldUseLocalFallback(): Promise<boolean> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
     try {
+      const headers: Record<string, string> = {
+        apikey: supabaseSecretKey,
+      };
+      if (isJwtKey(supabaseSecretKey)) {
+        headers.Authorization = `Bearer ${supabaseSecretKey}`;
+      }
       const res = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/rest/v1/`, {
-        method: 'HEAD',
+        method: 'GET',
         headers: {
-          apikey: supabaseSecretKey,
-          Authorization: `Bearer ${supabaseSecretKey}`,
+          ...headers,
+          Accept: 'application/openapi+json',
         },
         signal: controller.signal,
       });
-      // Any HTTP response (even 401/404) confirms network + DNS reachability
-      const reachable = res.status > 0;
-      supabaseStatusCache = { reachable, checkedAt: now };
-      return !reachable;
+
+      if (res.status === 401 || res.status === 403) {
+        const detail = `Supabase rejected API credentials (HTTP ${res.status}). Verify SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY.`;
+        console.error('[Supabase Connectivity]', detail);
+        supabaseStatusCache = { reachable: false, checkedAt: now, detail };
+        return { configured: true, reachable: false, keyFormat, detail };
+      }
+
+      const reachable = res.status > 0 && res.status < 500;
+      const detail = reachable ? undefined : `Supabase gateway returned HTTP ${res.status}.`;
+      supabaseStatusCache = { reachable, checkedAt: now, detail };
+      return { configured: true, reachable, keyFormat, detail };
     } finally {
       clearTimeout(timer);
     }
   } catch (err) {
+    const detail = err instanceof Error ? err.message : 'Supabase host unreachable';
     if (isSupabaseTransportError(err)) {
-      console.warn(
-        '[Supabase Reachability] Supabase host unreachable; using local persistent store fallback.'
-      );
-      supabaseStatusCache = { reachable: false, checkedAt: now };
-      return true;
+      console.warn('[Supabase Reachability] Supabase host unreachable:', detail);
     }
-    supabaseStatusCache = { reachable: false, checkedAt: now };
+    supabaseStatusCache = { reachable: false, checkedAt: now, detail };
+    return { configured: true, reachable: false, keyFormat, detail };
+  }
+}
+
+export async function shouldUseLocalFallback(): Promise<boolean> {
+  const status = await checkSupabaseConnectivity();
+  if (!status.configured) {
     return true;
   }
+  return !status.reachable;
 }
